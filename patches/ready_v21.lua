@@ -1,5 +1,5 @@
--- XOMA pre-game Ready / Difficulty / W0 patch
--- Build: PASS17-W0-IN-READY-V27
+-- XOMA pre-game Ready / Difficulty / W0 / end-action guard patch
+-- Build: PASS21-ENDSCREEN-GATE-V31
 -- Ready and difficulty use authoritative replicated Voting state for confirmation.
 -- Runtime scans show the real voting connection is hidden while the exposed
 -- second MouseButton1Down connection is cosmetic. Prefer the hidden connection
@@ -7,12 +7,14 @@
 -- event. Never move the cursor, send keyboard input, or use VirtualUser.
 -- W0 actions begin immediately after Ready + Difficulty confirmation, while the
 -- voting/countdown phase is still active, matching how Recorder labels pre-wave actions.
+-- Auto Retry / Auto Back to Lobby are gated by a genuinely visible/active end-screen
+-- action button so stale PlayerGameResult values cannot stop replay mid-match.
 
 local environment = typeof(getgenv) == "function" and getgenv() or _G
 local session = environment.CTDIG_SESSION
 
 if type(session) ~= "table" or type(session.auto) ~= "table" then
-    error("XOMA V27 ready patch: CTDIG session is unavailable")
+    error("XOMA V31 ready patch: CTDIG session is unavailable")
 end
 
 local Players = game:GetService("Players")
@@ -260,7 +262,7 @@ function session.auto.autoReadyVoting(timeout)
     while session.alive and os.clock() < deadline do
         if waitingDone.Value == true then
             print(
-                "[XOMA V27] Ready Up confirmed after "
+                "[XOMA V31] Ready Up confirmed after "
                     .. tostring(attempts) .. " attempts"
             )
             return true
@@ -270,7 +272,7 @@ function session.auto.autoReadyVoting(timeout)
             attempts = attempts + 1
             local okClick, detail = session.auto.clickGuiButton(readyButton)
             print(
-                "[XOMA V27] Ready Up attempt " .. tostring(attempts)
+                "[XOMA V31] Ready Up attempt " .. tostring(attempts)
                     .. " | ok=" .. tostring(okClick)
                     .. " | " .. tostring(detail)
             )
@@ -322,7 +324,7 @@ function session.auto.autoSelectDifficulty(macro, timeout)
     while session.alive and os.clock() < deadline do
         if difficultyConfirmedName(wanted) then
             print(
-                "[XOMA V27] Difficulty " .. tostring(wanted)
+                "[XOMA V31] Difficulty " .. tostring(wanted)
                     .. " confirmed after " .. tostring(attempts) .. " attempts"
             )
             return true
@@ -350,7 +352,7 @@ function session.auto.autoSelectDifficulty(macro, timeout)
             attempts = attempts + 1
             local okClick, detail = session.auto.clickGuiButton(button)
             print(
-                "[XOMA V27] Difficulty " .. tostring(wanted)
+                "[XOMA V31] Difficulty " .. tostring(wanted)
                     .. " attempt " .. tostring(attempts)
                     .. " | ok=" .. tostring(okClick)
                     .. " | " .. tostring(detail)
@@ -387,7 +389,7 @@ function session.auto.waitForPregameFinished(macro, timeout)
 
     local readyOk, readyError = session.auto.autoReadyVoting(12)
     if not readyOk then
-        print("[XOMA V27] Auto Ready warning: " .. tostring(readyError))
+        print("[XOMA V31] Auto Ready warning: " .. tostring(readyError))
     end
 
     local voteOk, voteError = session.auto.autoSelectDifficulty(macro, 12)
@@ -395,10 +397,81 @@ function session.auto.waitForPregameFinished(macro, timeout)
         return false, voteError
     end
 
-    print("[XOMA V27] Ready + difficulty confirmed | starting W0 replay during pre-game")
+    print("[XOMA V31] Ready + difficulty confirmed | starting W0 replay during pre-game")
     return true
 end
 
-session.readyBuild = "PASS17-W0-IN-READY-V27"
-session.w0Build = "PASS17-W0-IN-READY-V27"
+-- Core's old handleEndAction reads PlayerGameResult before proving the result UI
+-- is live and stops replay before checking the button. A stale Triumph/Defeat can
+-- therefore kill a new replay. Gate the original handler behind a genuinely live
+-- Restart/Return button (or an already-confirmed end marker).
+do
+    local originalEndAction = session.recorder and session.recorder.handleEndAction
+
+    if type(originalEndAction) == "function" then
+        local function hierarchyVisible(object, playerGui)
+            local current = object
+            while current and current ~= playerGui do
+                if current:IsA("GuiObject") and current.Visible == false then
+                    return false
+                end
+                if current:IsA("LayerCollector") and current.Enabled == false then
+                    return false
+                end
+                current = current.Parent
+            end
+            return true
+        end
+
+        local function liveEndActionPresent(playerGui)
+            if not playerGui then
+                return false
+            end
+
+            for _, object in ipairs(playerGui:GetDescendants()) do
+                if object:IsA("GuiButton")
+                    and (object.Name == "Restart" or object.Name == "Return")
+                    and object:FindFirstAncestor("EndFrame")
+                    and object.Active == true
+                    and object.AbsoluteSize.X > 1
+                    and object.AbsoluteSize.Y > 1
+                    and hierarchyVisible(object, playerGui)
+                then
+                    return true
+                end
+            end
+
+            return false
+        end
+
+        session.recorder.handleEndAction = function()
+            if not session.alive then
+                return
+            end
+
+            local playerGui = player and player:FindFirstChildOfClass("PlayerGui")
+            if not playerGui then
+                return
+            end
+
+            local endFrame = playerGui:FindFirstChild("EndFrame", true)
+            if not endFrame then
+                return
+            end
+
+            local alreadyConfirmed = endFrame:FindFirstChild("Restarted", true)
+                or endFrame:FindFirstChild("Teleported", true)
+
+            if not alreadyConfirmed and not liveEndActionPresent(playerGui) then
+                return
+            end
+
+            return originalEndAction()
+        end
+    end
+end
+
+session.readyBuild = "PASS21-ENDSCREEN-GATE-V31"
+session.w0Build = "PASS21-ENDSCREEN-GATE-V31"
+session.endActionBuild = "PASS21-ENDSCREEN-GATE-V31"
 return session.XOMA

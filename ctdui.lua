@@ -1,7 +1,7 @@
 -- XOMA / CTDIG bootstrap
--- Build: PASS6-SESSION-XOMA-V16
--- The core is split into source chunks only to keep GitHub updates manageable.
--- Strategies keep using the same XOMA:Place / XOMA:Upgrade / ... API.
+-- Build: PASS7-AUTOEXEC-V17
+-- Base core stays on the stable V16 chunks; V17 applies a small AutoExec patch.
+-- Strategy syntax remains unchanged: XOMA:Place / XOMA:Upgrade / ... / XOMA:Run.
 
 local BASE = "https://raw.githubusercontent.com/evilxoma/xomahub/refs/heads/main/src/"
 local parts = {}
@@ -11,9 +11,20 @@ for i = 1, 16 do
 end
 
 local source = table.concat(parts, "\n")
-local chunk, err = loadstring(source)
-if not chunk then
-    error("XOMA core compile failed: " .. tostring(err))
+local coreChunk, coreError = loadstring(source)
+if not coreChunk then
+    error("XOMA core compile failed: " .. tostring(coreError))
 end
 
-return chunk()
+local XOMA = coreChunk()
+
+local patchSource = game:HttpGet(
+    "https://raw.githubusercontent.com/evilxoma/xomahub/refs/heads/main/patches/autoexec_v17.lua"
+)
+local patchChunk, patchError = loadstring(patchSource)
+if not patchChunk then
+    error("XOMA AutoExec patch compile failed: " .. tostring(patchError))
+end
+
+local patchedXOMA = patchChunk()
+return patchedXOMA or XOMA

@@ -1,0 +1,500 @@
+        allGood = allGood and good
+        lines[#lines + 1] = (good and "OK  " or "MISS ") .. check[1]
+    end
+
+    local text = table.concat(lines, "\n")
+    debugLog(text)
+    notify(allGood and "CTDIG self-check OK" or "CTDIG self-check FAILED", text, 8)
+    return allGood
+end
+
+session.recorder = {
+    bindGameSources = bindGameSources,
+    ensurePlacementRecorder = ensurePlacementRecorder,
+    handleEndAction = handleEndAction,
+    onTowerPlaced = onTowerPlaced,
+    replayMacro = replayMacro,
+    selfCheck = selfCheck,
+    startRecording = startRecording,
+    stopRecording = stopRecording,
+}
+end
+
+RecorderBox:AddButton({
+    Text = "Record",
+    Func = session.recorder.startRecording,
+})
+
+RecorderBox:AddButton({
+    Text = "Stop & Save",
+    Func = session.recorder.stopRecording,
+})
+
+RecorderBox:AddButton({
+    Text = "Clear",
+    Func = function()
+        actions = {}
+        ids = {}
+        baselineTowers = setmetatable({}, { __mode = "k" })
+        nextId = 1
+        macroDeck = {}
+        recording = false
+        placementAttempt = nil
+        recentPlacement = nil
+        table.clear(session.placementQueue)
+        recordedSkipWaves = {}
+        pendingSkipWave = nil
+        pendingSkipAt = 0
+        lastSkipConfirmationWave = nil
+        lastSkipConfirmationAt = 0
+        resetLogger(false)
+        if not replaying and not replayTaskRunning then
+            setRecorderState("idle")
+        end
+        notify("Macro recorder", "Recording cleared", 2)
+    end,
+})
+
+RecorderBox:AddButton({
+    Text = "Self-check",
+    Func = session.recorder.selfCheck,
+})
+
+ReplayBox:AddButton({
+    Text = "Replay ctdig.lua",
+    Func = function()
+        task.spawn(function()
+            local ok, err = xpcall(session.recorder.replayMacro, tracebackError)
+            if not ok then
+                replaying = false
+                replayTaskRunning = false
+                warn("[CTDIG] Replay runtime error:\n" .. tostring(err))
+                if session.alive then
+                    setRecorderState("replay_stopped")
+                    setReplayStatus("Stopped: runtime error")
+                    notify("Replay error", tostring(err), 6)
+                end
+            end
+        end)
+    end,
+})
+
+ReplayBox:AddButton({
+    Text = "Stop Replay",
+    Func = function()
+        if replaying then
+            replayStopRequested = true
+            replaying = false
+            setRecorderState("replay_stopped")
+            setReplayStatus("Stopped by user")
+            notify("Replay", "Stopped", 2)
+        end
+    end,
+})
+
+if Toggles.CTDIGAutoSkip then
+    Toggles.CTDIGAutoSkip:OnChanged(function()
+        if autoSkipChanging then
+            return
+        end
+
+        autoSkipChanging = true
+        task.spawn(function()
+            if not session.alive then
+                autoSkipChanging = false
+                return
+            end
+
+            local wanted = Toggles.CTDIGAutoSkip.Value == true
+            local ok, err = setNativeAutoSkip(wanted)
+            if not session.alive then
+                autoSkipChanging = false
+                return
+            end
+
+            if ok then
+                notify("Auto Skip", wanted and "Enabled" or "Disabled", 2)
+            else
+                notify("Auto Skip error", err, 5)
+                local setting = getNativeAutoSkipSetting()
+                if setting and Toggles.CTDIGAutoSkip.Value ~= setting.Value then
+                    Toggles.CTDIGAutoSkip:SetValue(setting.Value)
+                end
+            end
+            autoSkipChanging = false
+        end)
+    end)
+end
+
+local liveAutoSkip = getNativeAutoSkipSetting()
+if liveAutoSkip then
+    connect(liveAutoSkip.Changed, function(value)
+        if Toggles.CTDIGAutoSkip and Toggles.CTDIGAutoSkip.Value ~= (value == true) then
+            autoSkipChanging = true
+            Toggles.CTDIGAutoSkip:SetValue(value == true)
+            autoSkipChanging = false
+        end
+    end)
+end
+
+session.recorder.ensurePlacementRecorder()
+
+connect(playerGui.DescendantAdded, function(descendant)
+    if descendant.Name == "Configuration" or descendant.Name == "CommencingPlace" then
+        if descendant.Name == "Configuration" and descendant ~= placementConfiguration then
+            placementRecorderBound = false
+        elseif descendant.Name == "CommencingPlace" and descendant.Parent ~= placementConfiguration then
+            placementRecorderBound = false
+        end
+        task.defer(function()
+            if session.alive then
+                session.recorder.ensurePlacementRecorder()
+            end
+        end)
+    end
+end)
+
+local function bindRangePreviewValue(value)
+    if not value or not value:IsA("ValueBase") or rangePreviewBoundValues[value] then
+        return
+    end
+
+    rangePreviewBoundValues[value] = true
+    connect(value.Changed, function()
+        task.defer(function()
+            if session.alive then
+                session.visuals.refreshRangePreview()
+            end
+        end)
+    end)
+end
+
+local function ensureRangePreviewBindings()
+    local config = findPlacementConfiguration()
+    if not config then
+        return false
+    end
+
+    for _, name in ipairs({ "UnitChoosed", "UnitEditor", "CurrentUnitPlacingObject" }) do
+        bindRangePreviewValue(config:FindFirstChild(name))
+    end
+
+    session.visuals.refreshRangePreview()
+    return true
+end
+
+local function startRangePreviewBinding()
+    if rangePreviewBindingStarted then
+        return
+    end
+    rangePreviewBindingStarted = true
+
+    ensureRangePreviewBindings()
+
+    -- Configuration may be created after the hub. Rebind when the game's
+    -- placement values appear instead of giving up forever after one miss.
+    connect(playerGui.DescendantAdded, function(descendant)
+        if descendant.Name == "Configuration"
+            or descendant.Name == "UnitChoosed"
+            or descendant.Name == "UnitEditor"
+            or descendant.Name == "CurrentUnitPlacingObject"
+        then
+            task.defer(function()
+                if session.alive then
+                    ensureRangePreviewBindings()
+                end
+            end)
+        end
+    end)
+end
+
+startRangePreviewBinding()
+
+session.setWebhookStatus(
+    Toggles.CTDIGWebhookEnabled
+        and Toggles.CTDIGWebhookEnabled.Value
+        and "Webhook: waiting for result"
+        or "Webhook: disabled"
+)
+
+if Toggles.CTDIGAutoRetry then
+    Toggles.CTDIGAutoRetry:OnChanged(function()
+        if endActionChanging then
+            return
+        end
+        endActionChanging = true
+        if Toggles.CTDIGAutoRetry.Value and Toggles.CTDIGAutoBackLobby and Toggles.CTDIGAutoBackLobby.Value then
+            Toggles.CTDIGAutoBackLobby:SetValue(false)
+        end
+        session.endAction.key = nil
+        session.endAction.confirmed = false
+        session.endAction.requested = false
+        session.endAction.requestedAt = 0
+        session.endAction.requestText = nil
+        session.endAction.attempts = 0
+        session.endAction.nextAttempt = 0
+        setEndActionStatus(Toggles.CTDIGAutoRetry.Value and "End action: AUTO RETRY" or "End action: OFF")
+        endActionChanging = false
+    end)
+end
+
+if Toggles.CTDIGAutoBackLobby then
+    Toggles.CTDIGAutoBackLobby:OnChanged(function()
+        if endActionChanging then
+            return
+        end
+        endActionChanging = true
+        if Toggles.CTDIGAutoBackLobby.Value and Toggles.CTDIGAutoRetry and Toggles.CTDIGAutoRetry.Value then
+            Toggles.CTDIGAutoRetry:SetValue(false)
+        end
+        session.endAction.key = nil
+        session.endAction.confirmed = false
+        session.endAction.requested = false
+        session.endAction.requestedAt = 0
+        session.endAction.requestText = nil
+        session.endAction.attempts = 0
+        session.endAction.nextAttempt = 0
+        setEndActionStatus(Toggles.CTDIGAutoBackLobby.Value and "End action: AUTO LOBBY" or "End action: OFF")
+        endActionChanging = false
+    end)
+end
+
+if Toggles.CTDIGRangePreview then
+    Toggles.CTDIGRangePreview:OnChanged(function()
+        ensureRangePreviewBindings()
+        session.visuals.refreshRangePreview()
+    end)
+end
+
+if Toggles.CTDIGWebhookEnabled then
+    Toggles.CTDIGWebhookEnabled:OnChanged(function()
+        session.webhook.sent = false
+        session.webhook.attempts = 0
+        session.webhook.nextAttempt = 0
+        session.setWebhookStatus(
+            Toggles.CTDIGWebhookEnabled.Value
+                and "Webhook: waiting for result"
+                or "Webhook: disabled"
+        )
+    end)
+end
+
+if Toggles.CTDIGWebhookVictory then
+    Toggles.CTDIGWebhookVictory:OnChanged(function()
+        session.webhook.sent = false
+    end)
+end
+
+if Toggles.CTDIGWebhookDefeat then
+    Toggles.CTDIGWebhookDefeat:OnChanged(function()
+        session.webhook.sent = false
+    end)
+end
+
+if Options.CTDIGWebhookURL then
+    Options.CTDIGWebhookURL:OnChanged(function()
+        if Toggles.CTDIGWebhookEnabled and Toggles.CTDIGWebhookEnabled.Value then
+            session.setWebhookStatus("Webhook: URL updated")
+        end
+    end)
+end
+
+if Toggles.CTDIGTowerDPS then
+    session.combatTowerDpsEnabled = Toggles.CTDIGTowerDPS.Value == true
+    Toggles.CTDIGTowerDPS:OnChanged(function()
+        session.combatTowerDpsEnabled = Toggles.CTDIGTowerDPS.Value == true
+        if not session.combatTowerDpsEnabled then
+            session.visuals.clearDpsGuis()
+        end
+    end)
+end
+
+if Toggles.CTDIGKillPreview then
+    session.combatKillPreviewEnabled = Toggles.CTDIGKillPreview.Value == true
+    Toggles.CTDIGKillPreview:OnChanged(function()
+        session.combatKillPreviewEnabled = Toggles.CTDIGKillPreview.Value == true
+        if not session.combatKillPreviewEnabled then
+            session.visuals.clearKillHighlights()
+        end
+    end)
+end
+
+local function cleanup()
+    if not session.alive then
+        return
+    end
+
+    session.alive = false
+    recording = false
+    replaying = false
+    replayTaskRunning = false
+    replayStopRequested = true
+
+    for _, connection in ipairs(session.combatEnemySourceConnections or {}) do
+        pcall(function() connection:Disconnect() end)
+    end
+    for _, connection in ipairs(session.combatTowerSourceConnections or {}) do
+        pcall(function() connection:Disconnect() end)
+    end
+
+    for _, connection in ipairs(connections) do
+        pcall(function()
+            connection:Disconnect()
+        end)
+    end
+    table.clear(connections)
+
+    local boundTowers = {}
+    for tower in pairs(towerConnections) do
+        boundTowers[#boundTowers + 1] = tower
+    end
+    for _, tower in ipairs(boundTowers) do
+        disconnectTower(tower)
+    end
+
+    session.visuals.destroyRangePreview()
+    session.visuals.clearDpsGuis()
+    session.visuals.clearKillHighlights()
+
+    if Library and type(Library.Unload) == "function" then
+        pcall(function()
+            Library:Unload()
+        end)
+    end
+
+    if environment.CTDIG_SESSION == session then
+        environment.CTDIG_SESSION = nil
+    end
+end
+
+session.cleanup = cleanup
+
+local function updateDpsVisuals()
+    if session.combatTowerDpsEnabled ~= true then
+        session.visuals.clearDpsGuis()
+        setCombatDiagDps(session.combatBuild .. " | DPS OFF | state=false")
+        return
+    end
+
+    local towersFolder = getTowers()
+    local alive = {}
+    local now = os.clock()
+    local scanned = 0
+    local guiCount = 0
+    local statCount = 0
+    local liveCount = 0
+
+    do
+        session.bindCombatSources()
+
+        local dpsCandidates = {}
+        local staleTowers = {}
+
+        -- Direct Workspace.Towers children are authoritative. Reconcile every
+        -- visual tick so a ChildAdded replication race cannot permanently lose one.
+        if session.combatTowerFolder then
+            for _, tower in ipairs(session.combatTowerFolder:GetChildren()) do
+                session.combatTowers[tower] = true
+            end
+        end
+
+        for tower in pairs(session.combatTowers) do
+            if tower
+                and tower.Parent == session.combatTowerFolder
+                and getRoot(tower)
+            then
+                dpsCandidates[#dpsCandidates + 1] = tower
+            else
+                staleTowers[#staleTowers + 1] = tower
+            end
+        end
+
+        for _, tower in ipairs(staleTowers) do
+            session.combatTowers[tower] = nil
+        end
+
+        for _, tower in ipairs(dpsCandidates) do
+            if getRoot(tower) then
+                scanned = scanned + 1
+                alive[tower] = true
+
+                local guiOk, data = pcall(session.visuals.ensureDpsGui, tower)
+                if guiOk and data then
+                    guiCount = guiCount + 1
+
+                    local statsOk, stats = pcall(session.visuals.towerCombatStats, tower)
+                    local textValue
+
+                    if statsOk and stats then
+                        statCount = statCount + 1
+
+                        -- Stable DPS = effective damage / effective attack interval.
+                        -- Never substitute bursty DeltaTotalDMG / DeltaTime here.
+                        textValue = string.format(
+                            "LVL %d  •  DPS %s\n%s DMG / %ss",
+                            getLevel(tower),
+                            session.visuals.formatCompactNumber(stats.dps),
+                            session.visuals.formatCompactNumber(stats.damage),
+                            session.visuals.formatCompactNumber(stats.interval)
+                        )
+                    else
+                        local config = tower:FindFirstChild("Configuration")
+                        local damage = session.visuals.readNumberValue(config, "Damage")
+                        local reload = session.visuals.readNumberValue(config, "ReloadTime")
+                        local fallbackDps
+
+                        if damage and reload and reload > 0 then
+                            fallbackDps = damage / reload
+                        end
+
+                        textValue = string.format(
+                            "LVL %d  •  DPS %s\nDMG %s | RATE %s",
+                            getLevel(tower),
+                            fallbackDps and session.visuals.formatCompactNumber(fallbackDps) or "—",
+                            damage ~= nil and session.visuals.formatCompactNumber(damage) or "missing",
+                            reload ~= nil and session.visuals.formatCompactNumber(reload) or "missing"
+                        )
+                    end
+
+                    if data.lastText ~= textValue then
+                        data.lastText = textValue
+                        data.label.Text = textValue
+                    end
+                end
+            end
+        end
+    end
+
+    for tower, data in pairs(dpsGuis) do
+        if not alive[tower] or not tower.Parent then
+            if data.gui then
+                pcall(function()
+                    data.gui:Destroy()
+                end)
+            end
+            dpsGuis[tower] = nil
+            dpsSamples[tower] = nil
+        end
+    end
+
+    setCombatDiagDps(string.format(
+        "%s | DPS towers=%d gui=%d stats=%d deterministic=true",
+        session.combatBuild,
+        scanned,
+        guiCount,
+        statCount
+    ))
+end
+
+-- Bind exact native sources once on the injection thread.
+session.bindCombatSources()
+
+-- One-time cleanup of stale visuals left by interrupted older CTDIG builds.
+pcall(function()
+    for _, object in ipairs(game.Workspace:GetDescendants()) do
+        if object.Name == "CTDIG_KillPreview"
+            or object.Name == "CTDIG_EnemyPredict"
+            or object.Name == "CTDIG_DPS"
+        then
+            object:Destroy()
+        end

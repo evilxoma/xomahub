@@ -1,0 +1,428 @@
+    local map = game.Workspace:FindFirstChild("Map")
+    local enemiesFolder = map and map:FindFirstChild("Enemies")
+    local towersFolder = game.Workspace:FindFirstChild("Towers")
+
+    if enemiesFolder ~= session.combatEnemyFolder then
+        for _, connection in ipairs(session.combatEnemySourceConnections) do
+            pcall(function() connection:Disconnect() end)
+        end
+        table.clear(session.combatEnemySourceConnections)
+        table.clear(session.combatEnemies)
+
+        session.combatEnemyFolder = enemiesFolder
+
+        if enemiesFolder then
+            for _, enemy in ipairs(enemiesFolder:GetChildren()) do
+                session.combatEnemies[enemy] = true
+            end
+
+            session.combatEnemySourceConnections[#session.combatEnemySourceConnections + 1] =
+                enemiesFolder.ChildAdded:Connect(function(enemy)
+                    if session.alive and enemy.Parent == session.combatEnemyFolder then
+                        session.combatEnemies[enemy] = true
+                    end
+                end)
+
+            session.combatEnemySourceConnections[#session.combatEnemySourceConnections + 1] =
+                enemiesFolder.ChildRemoved:Connect(function(enemy)
+                    session.combatEnemies[enemy] = nil
+                    removeKillHighlight(enemy)
+                end)
+        end
+    end
+
+    if towersFolder ~= session.combatTowerFolder then
+        for _, connection in ipairs(session.combatTowerSourceConnections) do
+            pcall(function() connection:Disconnect() end)
+        end
+        table.clear(session.combatTowerSourceConnections)
+        table.clear(session.combatTowers)
+
+        session.combatTowerFolder = towersFolder
+
+        if towersFolder then
+            for _, tower in ipairs(towersFolder:GetChildren()) do
+                session.combatTowers[tower] = true
+            end
+
+            session.combatTowerSourceConnections[#session.combatTowerSourceConnections + 1] =
+                towersFolder.ChildAdded:Connect(function(tower)
+                    if session.alive and tower.Parent == session.combatTowerFolder then
+                        session.combatTowers[tower] = true
+                    end
+                end)
+
+            session.combatTowerSourceConnections[#session.combatTowerSourceConnections + 1] =
+                towersFolder.ChildRemoved:Connect(function(tower)
+                    session.combatTowers[tower] = nil
+                end)
+        end
+    end
+
+    return enemiesFolder, towersFolder
+end
+
+local function getEnemyModels()
+    local enemiesFolder = session.bindCombatSources()
+    enemiesFolder = session.combatEnemyFolder or enemiesFolder
+
+    local enemies = {}
+    local direct = {}
+    local stale = {}
+
+    if enemiesFolder then
+        for _, enemy in ipairs(enemiesFolder:GetChildren()) do
+            direct[enemy] = true
+            session.combatEnemies[enemy] = true
+            enemies[#enemies + 1] = enemy
+        end
+    end
+
+    for enemy in pairs(session.combatEnemies) do
+        if not direct[enemy] then
+            stale[#stale + 1] = enemy
+        end
+    end
+
+    for _, enemy in ipairs(stale) do
+        session.combatEnemies[enemy] = nil
+        removeKillHighlight(enemy)
+    end
+
+    return enemies
+end
+
+local function towerBelongsToLocalPlayer(tower)
+    local owner = getOwner(tower)
+    if owner ~= nil then
+        return owner == player.Name or owner == tostring(player.UserId)
+    end
+
+    local config = tower and tower:FindFirstChild("Configuration")
+    return config ~= nil and config:FindFirstChild("Owner") == nil
+end
+
+local function trajectoryPositionAt(trajectory, time)
+    if type(trajectory) ~= "table" or type(trajectory.segments) ~= "table" then
+        return nil
+    end
+
+    local lastPosition
+    for _, segment in ipairs(trajectory.segments) do
+        local duration = math.max(0, (segment.finish or 0) - (segment.start or 0))
+        if duration > 0 then
+            if time >= (segment.start or 0) and time <= (segment.finish or 0) then
+                local localTime = time - (segment.start or 0)
+                return segment.from + segment.velocity * localTime
+            end
+            lastPosition = segment.from + segment.velocity * duration
+        end
+    end
+
+    return lastPosition
+end
+
+local function normalizeTargetMode(mode)
+    mode = string.lower(tostring(mode or "First"))
+    mode = mode:gsub("[%s_%-]", "")
+    return mode
+end
+
+local function predictTargetBetter(tower, candidate, best, shotTime)
+    if not best then
+        return true
+    end
+
+    local mode = tower.targetMode
+    if mode:find("strong") then
+        if candidate.remaining ~= best.remaining then
+            return candidate.remaining > best.remaining
+        end
+    elseif mode:find("weak") then
+        if candidate.remaining ~= best.remaining then
+            return candidate.remaining < best.remaining
+        end
+    elseif mode:find("last") then
+        local candidateExit = candidate.trajectory.exitTime or 60
+        local bestExit = best.trajectory.exitTime or 60
+        if candidateExit ~= bestExit then
+            return candidateExit > bestExit
+        end
+    elseif mode:find("close") or mode:find("near") then
+        local candidatePosition = trajectoryPositionAt(candidate.trajectory, shotTime)
+        local bestPosition = trajectoryPositionAt(best.trajectory, shotTime)
+        if candidatePosition and bestPosition then
+            local candidateDistance = horizontal(candidatePosition - tower.position).Magnitude
+            local bestDistance = horizontal(bestPosition - tower.position).Magnitude
+            if math.abs(candidateDistance - bestDistance) > 0.01 then
+                return candidateDistance < bestDistance
+            end
+        end
+    elseif mode:find("far") then
+        local candidatePosition = trajectoryPositionAt(candidate.trajectory, shotTime)
+        local bestPosition = trajectoryPositionAt(best.trajectory, shotTime)
+        if candidatePosition and bestPosition then
+            local candidateDistance = horizontal(candidatePosition - tower.position).Magnitude
+            local bestDistance = horizontal(bestPosition - tower.position).Magnitude
+            if math.abs(candidateDistance - bestDistance) > 0.01 then
+                return candidateDistance > bestDistance
+            end
+        end
+    else
+        local candidateExit = candidate.trajectory.exitTime or 60
+        local bestExit = best.trajectory.exitTime or 60
+        if candidateExit ~= bestExit then
+            return candidateExit < bestExit
+        end
+    end
+
+    if candidate.progress ~= best.progress then
+        return candidate.progress > best.progress
+    end
+    return candidate.index < best.index
+end
+
+local function updateKillPreview()
+    if session.combatKillPreviewEnabled ~= true then
+        clearKillHighlights()
+        setKillInfo("Kill Preview: OFF")
+        setCombatDiagPredict(session.combatBuild .. " | Predict OFF | state=false")
+        return
+    end
+
+    local now = os.clock()
+    if now - lastKillPreviewUpdate < 0.25 then
+        return
+    end
+    lastKillPreviewUpdate = now
+
+    local enemiesFolder, towersFolder = session.bindCombatSources()
+    local horizon = 120
+    local enemies = {}
+    local seen = {}
+    local healthMisses = 0
+    local incompletePaths = 0
+
+    local discoveredEnemies = getEnemyModels()
+
+    for _, enemyModel in ipairs(discoveredEnemies) do
+        if not seen[enemyModel] then
+            local healthData = enemyHealthData(enemyModel)
+            local root = getRoot(enemyModel)
+            if healthData and healthData.current > 0 and root then
+                local velocity = sampleEnemyVelocity(enemyModel, now)
+                local config = enemyModel:FindFirstChild("Configuration")
+                local trajectory = buildEnemyTrajectory(enemyModel, root.Position, velocity, horizon)
+                if not trajectory.complete then
+                    incompletePaths = incompletePaths + 1
+                end
+
+                enemies[#enemies + 1] = {
+                    index = #enemies + 1,
+                    model = enemyModel,
+                    root = root,
+                    position = root.Position,
+                    velocity = velocity,
+                    trajectory = trajectory,
+                    health = healthData.current,
+                    remaining = healthData.current,
+                    healthData = healthData,
+                    progress = readNumberValue(enemyModel, "BaseProgress")
+                        or readNumberValue(enemyModel, "Progress")
+                        or readNumberValue(config, "CurrentPath")
+                        or 0,
+                    potentialDps = 0,
+                    covered = false,
+                    predictedShots = 0,
+                }
+                seen[enemyModel] = true
+            else
+                healthMisses = healthMisses + 1
+            end
+        end
+    end
+
+    if #enemies == 0 then
+        local stale = {}
+        for enemy in pairs(killHighlights) do stale[#stale + 1] = enemy end
+        for enemy in pairs(killLabels) do if not killHighlights[enemy] then stale[#stale + 1] = enemy end end
+        for _, enemy in ipairs(stale) do removeKillHighlight(enemy) end
+        setKillInfo("Kill Preview: waiting for replicated enemy data")
+        setCombatDiagPredict(string.format(
+            "%s | ready=0 direct=%d folder=%s health/root-wait=%d",
+            session.combatBuild,
+            #discoveredEnemies,
+            enemiesFolder and enemiesFolder:GetFullName() or "nil",
+            healthMisses
+        ))
+        return
+    end
+
+    local towers = {}
+    local towerStatMisses = 0
+    local towerCandidates = {}
+    local staleTowers = {}
+
+    session.bindCombatSources()
+
+    if session.combatTowerFolder then
+        for _, towerModel in ipairs(session.combatTowerFolder:GetChildren()) do
+            session.combatTowers[towerModel] = true
+        end
+    end
+
+    for towerModel in pairs(session.combatTowers) do
+        if towerModel and towerModel.Parent == session.combatTowerFolder and getRoot(towerModel) then
+            towerCandidates[#towerCandidates + 1] = towerModel
+        else
+            staleTowers[#staleTowers + 1] = towerModel
+        end
+    end
+
+    for _, towerModel in ipairs(staleTowers) do session.combatTowers[towerModel] = nil end
+
+    for _, towerModel in ipairs(towerCandidates) do
+        if towerBelongsToLocalPlayer(towerModel) then
+            local root = getRoot(towerModel)
+            local stats = towerCombatStats(towerModel)
+            if root and stats and stats.damage > 0 and stats.interval > 0 and stats.range > 0 then
+                local damageType, damageSubtype = towerDamageType(towerModel)
+                stats.damageType = damageType
+                stats.damageSubtype = damageSubtype
+
+                local tower = {
+                    model = towerModel,
+                    stats = stats,
+                    position = root.Position,
+                    damage = stats.damage,
+                    interval = stats.interval,
+                    dps = stats.dps,
+                    range = stats.range,
+                    readyAt = towerReadyIn(towerModel, stats.interval, now),
+                    targetMode = normalizeTargetMode(getTarget(towerModel)),
+                    coverage = {},
+                    damageByEnemy = {},
+                }
+
+                for enemyIndex, enemy in ipairs(enemies) do
+                    local intervals = trajectoryCoverage(enemy.trajectory, tower)
+                    if #intervals > 0 then
+                        tower.coverage[enemyIndex] = intervals
+                        enemy.covered = true
+
+                        local effectiveDamage = effectiveDamageAgainstEnemy(stats, enemy)
+                        tower.damageByEnemy[enemyIndex] = effectiveDamage
+                        if effectiveDamage > 0 then
+                            enemy.potentialDps = enemy.potentialDps + effectiveDamage / stats.interval
+                        end
+                    end
+                end
+                towers[#towers + 1] = tower
+            else
+                towerStatMisses = towerStatMisses + 1
+            end
+        end
+    end
+
+    if #towers == 0 then
+        for _, enemy in ipairs(enemies) do
+            setEnemyKillColor(enemy.model, false, enemy.health, enemy.health, 0)
+        end
+        setKillInfo(string.format("Predict: %d enemies | no usable towers", #enemies))
+        setCombatDiagPredict(string.format(
+            "%s | enemies=%d towers=0 registryTowers=%d folder=%s statMiss=%d healthMiss=%d",
+            session.combatBuild,
+            #enemies,
+            #towerCandidates,
+            towersFolder and towersFolder:GetFullName() or "nil",
+            towerStatMisses,
+            healthMisses
+        ))
+        return
+    end
+
+    local totalHealth = 0
+    local smallestDamage = math.huge
+    local aliveEnemies = 0
+    for _, enemy in ipairs(enemies) do
+        totalHealth = totalHealth + enemy.health
+        aliveEnemies = aliveEnemies + 1
+    end
+    for _, tower in ipairs(towers) do
+        if tower.damage > 0 then smallestDamage = math.min(smallestDamage, tower.damage) end
+    end
+
+    local usefulShots = smallestDamage < math.huge and math.ceil(totalHealth / math.max(0.001, smallestDamage)) or 0
+    local maxEvents = math.clamp(usefulShots * 4 + #towers * 24 + #enemies * 16, 400, 10000)
+    local shots = 0
+    local events = 0
+
+    for _ = 1, maxEvents do
+        if aliveEnemies <= 0 then break end
+
+        local activeTower
+        for _, tower in ipairs(towers) do
+            if tower.readyAt <= horizon and (not activeTower or tower.readyAt < activeTower.readyAt) then
+                activeTower = tower
+            end
+        end
+        if not activeTower then break end
+
+        events = events + 1
+        local shotTime = activeTower.readyAt
+        local bestEnemy
+        local nextEnter
+
+        for enemyIndex, enemy in ipairs(enemies) do
+            if enemy.remaining > 0 and not enemy.healthData.invulnerable and shotTime <= enemy.trajectory.exitTime + 1e-4 then
+                local intervals = activeTower.coverage[enemyIndex]
+                if intervals then
+                    local interval, inside = intervalAtOrAfter(intervals, shotTime)
+                    if interval then
+                        if inside then
+                            if predictTargetBetter(activeTower, enemy, bestEnemy, shotTime) then bestEnemy = enemy end
+                        elseif interval.enter <= horizon and (not nextEnter or interval.enter < nextEnter) then
+                            nextEnter = interval.enter
+                        end
+                    end
+                end
+            end
+        end
+
+        if bestEnemy then
+            local damage = activeTower.damageByEnemy[bestEnemy.index] or effectiveDamageAgainstEnemy(activeTower.stats, bestEnemy)
+            local before = bestEnemy.remaining
+            bestEnemy.remaining = math.max(0, before - math.max(0, damage))
+            bestEnemy.predictedShots = bestEnemy.predictedShots + 1
+            shots = shots + 1
+            if before > 0 and bestEnemy.remaining <= 0 then aliveEnemies = aliveEnemies - 1 end
+            activeTower.readyAt = shotTime + activeTower.interval
+        elseif nextEnter then
+            activeTower.readyAt = math.max(shotTime + 0.001, nextEnter)
+        else
+            activeTower.readyAt = math.huge
+        end
+    end
+
+    local safe, leaks, uncovered = 0, 0, 0
+    for _, enemy in ipairs(enemies) do
+        local lethal = enemy.remaining <= 0 and not enemy.healthData.invulnerable
+        if lethal then
+            safe = safe + 1
+        else
+            leaks = leaks + 1
+            if not enemy.covered then uncovered = uncovered + 1 end
+        end
+
+        setEnemyKillColor(enemy.model, lethal, enemy.health, enemy.remaining, enemy.potentialDps)
+    end
+
+    local stale = {}
+    for enemy in pairs(killHighlights) do if not seen[enemy] then stale[#stale + 1] = enemy end end
+    for enemy in pairs(killLabels) do if not seen[enemy] and not killHighlights[enemy] then stale[#stale + 1] = enemy end end
+    for _, enemy in ipairs(stale) do removeKillHighlight(enemy) end
+
+    setKillInfo(string.format(
+        "Predict: %d SAFE | %d LEAK | %d enemies | %d towers%s",
+        safe,
+        leaks,

@@ -8,12 +8,13 @@ local existingSession = environment.CTDIG_SESSION
 
 if type(existingSession) == "table"
     and existingSession.alive == true
+    and existingSession.dataModel == game
     and type(existingSession.XOMA) == "table"
     and type(existingSession.XOMA.Run) == "function"
 then
     -- A recorder strategy always calls ctdui.lua before declaring its actions.
-    -- When the hub is already alive (Replay button), reuse it but give the
-    -- strategy a clean builder so actions from a previous run never duplicate.
+    -- When the hub is already alive in THIS DataModel (Replay button), reuse it
+    -- but give the strategy a clean builder so previous actions never duplicate.
     existingSession.XOMA._macro = {
         version = 1,
         map = "Unknown",
@@ -32,7 +33,7 @@ task.spawn(function()
     local Players = game:GetService("Players")
     local Workspace = game:GetService("Workspace")
     local player = Players.LocalPlayer
-    local voting = Workspace:FindFirstChild("Voting")
+    local voting = Workspace:FindFirstChild("Voting") or Workspace:WaitForChild("Voting", 15)
     if not player or not voting then
         return
     end
@@ -82,8 +83,8 @@ task.spawn(function()
         return
     end
 
-    local waitingDone = voting:FindFirstChild("WaitingRoomDone")
-    local readyButton = votingGui:FindFirstChild("WaitingRoom")
+    local waitingDone = voting:FindFirstChild("WaitingRoomDone") or voting:WaitForChild("WaitingRoomDone", 5)
+    local readyButton = votingGui:FindFirstChild("WaitingRoom") or votingGui:WaitForChild("WaitingRoom", 5)
     local readyDeadline = os.clock() + 10
     local lastReadyClick = 0
 
@@ -95,12 +96,12 @@ task.spawn(function()
         task.wait(0.1)
     end
 
-    local startValue = voting:FindFirstChild("Start")
-    local votes = voting:FindFirstChild("DifficultyVotes")
-    local holder = votingGui:FindFirstChild("DifficultyHolder")
-    local button = holder and holder:FindFirstChild(wanted)
-    local countdownGui = votingGui:FindFirstChild("Countdown")
-    local buttonsReady = countdownGui and countdownGui:FindFirstChild("ButtonsReady")
+    local startValue = voting:FindFirstChild("Start") or voting:WaitForChild("Start", 5)
+    local votes = voting:FindFirstChild("DifficultyVotes") or voting:WaitForChild("DifficultyVotes", 5)
+    local holder = votingGui:FindFirstChild("DifficultyHolder") or votingGui:WaitForChild("DifficultyHolder", 5)
+    local button = holder and (holder:FindFirstChild(wanted) or holder:WaitForChild(wanted, 5))
+    local countdownGui = votingGui:FindFirstChild("Countdown") or votingGui:WaitForChild("Countdown", 5)
+    local buttonsReady = countdownGui and (countdownGui:FindFirstChild("ButtonsReady") or countdownGui:WaitForChild("ButtonsReady", 5))
     local voteDeadline = os.clock() + 12
     local lastVoteClick = 0
 
@@ -176,6 +177,13 @@ if not coreChunk then
     error("XOMA core compile failed: " .. tostring(coreError))
 end
 local XOMA = coreChunk()
+
+-- Mark the live CTDIG session with the exact DataModel. This prevents a stale
+-- executor environment from reusing a session created before a Roblox teleport.
+local activeSession = environment.CTDIG_SESSION
+if type(activeSession) == "table" then
+    activeSession.dataModel = game
+end
 
 local autoexecSource = game:HttpGet(
     "https://raw.githubusercontent.com/evilxoma/xomahub/refs/heads/main/patches/autoexec_v17.lua"

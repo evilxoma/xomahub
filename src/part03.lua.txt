@@ -498,4 +498,3 @@ end
 local function getCTDModule()
     if ctdModule ~= nil then
         return ctdModule or nil
-    end

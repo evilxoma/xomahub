@@ -74,6 +74,9 @@ local function ensureEnemyPredictLabel(enemy)
         end
     end
     gui.StudsOffsetWorldSpace = Vector3.new(0, offsetY, 0)
+
+    -- Keep the visual in PlayerGui so the game's enemy cleanup/UI scripts do
+    -- not remove our local BillboardGui from the replicated enemy model.
     gui.Parent = playerGui or root
 
     local back = Instance.new("Frame")
@@ -164,6 +167,9 @@ local function setEnemyKillColor(enemy, lethal, currentHealth, predictedRemainin
     if label and label:IsA("TextLabel") then
         local hp = math.max(0, tonumber(currentHealth) or 0)
         local remaining = math.max(0, tonumber(predictedRemaining) or hp)
+
+        -- The highlight carries the state; the label shows exactly what the
+        -- discrete simulation thinks will remain when all reachable shots end.
         label.TextColor3 = Color3.fromRGB(255, 255, 255)
         label.Text = string.format(
             "HP %s  •  LEFT %s  •  %s",
@@ -347,6 +353,9 @@ end
 local function buildEnemyTrajectory(enemy, position, velocity, horizon)
     local points, complete = enemyPathPoints(enemy, position, velocity)
     local config = enemy:FindFirstChild("Configuration")
+
+    -- Measured motion sees slows/speed changes that BaseSpeed cannot. Only fall
+    -- back to replicated configured speed when the enemy is momentarily still.
     local speed = velocity.Magnitude
     if not speed or speed <= 0.04 then
         speed = readNumberValue(config, "Speed")
@@ -417,7 +426,13 @@ local function trajectoryCoverage(trajectory, tower)
     for _, segment in ipairs(trajectory.segments) do
         local duration = segment.finish - segment.start
         if duration > 0 then
-            local enter, leave = coverageInterval(segment.from, segment.velocity, tower.position, tower.range, duration)
+            local enter, leave = coverageInterval(
+                segment.from,
+                segment.velocity,
+                tower.position,
+                tower.range,
+                duration
+            )
             if enter then
                 enter = enter + segment.start
                 leave = math.min(leave + segment.start, trajectory.exitTime)
@@ -448,21 +463,33 @@ local function looksLikeRuntimeEnemy(object)
     if not object or object == Workspace or object == Workspace:FindFirstChild("Map") then
         return false
     end
+
+    -- Do not require Model. In this game a replicated enemy container may be
+    -- a Folder with the same direct runtime values/scripts/parts.
     local totalLife = object:FindFirstChild("TotalLife")
     local health2 = object:FindFirstChild("Health2")
     local humanoidObject = object:FindFirstChild("Humanoid")
     local config = object:FindFirstChild("Configuration")
+
     local hasHealth = totalLife ~= nil or health2 ~= nil or humanoidObject ~= nil
     if not hasHealth then
         return false
     end
+
+    -- CurrentPath/BaseSpeed/OriginEnemyName make accidental matches extremely
+    -- unlikely, while TotalLife alone is already authoritative for normal mobs.
     local enemySignature = object:FindFirstChild("BaseSpeed") ~= nil
         or object:FindFirstChild("OriginEnemyName") ~= nil
         or (config and config:FindFirstChild("CurrentPath") ~= nil)
         or totalLife ~= nil
+
     return enemySignature and getRoot(object) ~= nil
 end
 
+-- Native runtime registries.
+-- The game's own client uses Workspace.Map.Enemies.ChildAdded and
+-- Workspace.Towers.ChildAdded. We mirror that exact source instead of scanning
+-- unrelated Workspace models (which previously misclassified the player).
 session.combatEnemies = setmetatable({}, { __mode = "k" })
 session.combatTowers = setmetatable({}, { __mode = "k" })
 session.combatEnemyFolder = nil

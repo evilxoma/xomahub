@@ -1,0 +1,500 @@
+        and object:FindFirstChild("Limit") ~= nil
+        and object:FindFirstChild("MapMode") ~= nil
+        and object:FindFirstChild("CurrentPlayers") ~= nil
+        and object:FindFirstChild("baseplate", true) ~= nil
+end
+
+function session.auto.collectElevatorRooms()
+    local root = Workspace:FindFirstChild("Elevators")
+    local rooms = {}
+    if not root then
+        return rooms
+    end
+
+    for _, object in ipairs(root:GetDescendants()) do
+        if session.auto.isElevatorRoomCandidate(object) then
+            rooms[#rooms + 1] = object
+        end
+    end
+
+    table.sort(rooms, function(a, b)
+        local ao = a:FindFirstChild("RoomOwner")
+        local bo = b:FindFirstChild("RoomOwner")
+        local aFree = not ao or tostring(ao.Value) == "" or tostring(ao.Value) == player.Name
+        local bFree = not bo or tostring(bo.Value) == "" or tostring(bo.Value) == player.Name
+        if aFree ~= bFree then
+            return aFree
+        end
+        return a:GetFullName() < b:GetFullName()
+    end)
+    return rooms
+end
+
+function session.auto.playerInsideElevator(room)
+    if not room then
+        return false
+    end
+    local owner = room:FindFirstChild("RoomOwner")
+    if owner and tostring(owner.Value) == player.Name then
+        return true
+    end
+    local currentPlayers = room:FindFirstChild("CurrentPlayers")
+    if currentPlayers then
+        if currentPlayers:FindFirstChild(player.Name) then
+            return true
+        end
+        for _, entry in ipairs(currentPlayers:GetChildren()) do
+            if entry:IsA("ObjectValue") and entry.Value == player then
+                return true
+            end
+        end
+    end
+    return false
+end
+
+function session.auto.moveIntoElevator(room)
+    local character = player.Character or player.CharacterAdded:Wait()
+    local root = character:FindFirstChild("HumanoidRootPart")
+        or character:FindFirstChild("Torso")
+        or character.PrimaryPart
+    local plate = room and room:FindFirstChild("baseplate", true)
+    if not root or not plate or not plate:IsA("BasePart") then
+        return false, "elevator root/baseplate missing"
+    end
+
+    root.CFrame = plate.CFrame * CFrame.new(0, 3, 0)
+
+    if typeof(firetouchinterest) == "function" then
+        pcall(function()
+            firetouchinterest(root, plate, 0)
+            task.wait(0.05)
+            firetouchinterest(root, plate, 1)
+        end)
+    end
+
+    local started = os.clock()
+    while session.alive and os.clock() - started < 3.5 do
+        if session.auto.playerInsideElevator(room) then
+            return true
+        end
+        task.wait(0.1)
+    end
+
+    -- Some lobby builds invoke EnterElevator on the client before RoomOwner is
+    -- replicated. OpenRoom below remains the authoritative confirmation.
+    return true
+end
+
+function session.auto.openMacroMapFromLobby(macro)
+    local elevators = remotes:FindFirstChild("Elevators")
+    if not elevators or not elevators:IsA("RemoteFunction") then
+        return false, "Remotes.Elevators is missing"
+    end
+    if type(macro.map) ~= "string" or macro.map == "" or macro.map == "Unknown" then
+        return false, "macro has no valid map name"
+    end
+
+    local rooms = session.auto.collectElevatorRooms()
+    if #rooms == 0 then
+        return false, "no elevator rooms were found"
+    end
+
+    local lastError = "no free elevator accepted OpenRoom"
+    for index, room in ipairs(rooms) do
+        if not session.alive then
+            return false, "stopped"
+        end
+
+        local owner = room:FindFirstChild("RoomOwner")
+        if not owner or tostring(owner.Value) == "" or tostring(owner.Value) == player.Name then
+            setReplayStatus(string.format("Lobby | elevator %d/%d", index, #rooms))
+            local moved, moveError = session.auto.moveIntoElevator(room)
+            if moved then
+                local currentMap = room:FindFirstChild("CurrentMap")
+                local limit = room:FindFirstChild("Limit")
+                local entry = room:FindFirstChild("RoomEntryMode")
+                local mapMode = room:FindFirstChild("MapMode")
+                pcall(function() currentMap.Value = macro.map end)
+                pcall(function() limit.Value = 1 end)
+                pcall(function() entry.Value = "FriendsOnly" end)
+                pcall(function() mapMode.Value = "Classic" end)
+
+                local payload = {
+                    Gamemode = "Classic",
+                    CurrentMap = macro.map,
+                    Limit = 1,
+                    RoomEntryMode = "FriendsOnly",
+                    MapMode = "Classic",
+                    MapModifiers = {},
+                }
+
+                local callOk, opened = pcall(function()
+                    return elevators:InvokeServer(room, "OpenRoom", payload)
+                end)
+                if callOk and opened == true then
+                    notify("AutoExecute", "Room opened: " .. macro.map .. " | FriendsOnly", 3)
+                    setReplayStatus("Lobby | teleporting to " .. macro.map)
+                    task.wait(0.35)
+                    local tpOk, tpError = pcall(function()
+                        return elevators:InvokeServer(room, "Teleport")
+                    end)
+                    if tpOk then
+                        notify("AutoExecute", "Teleport requested: " .. macro.map, 4)
+                        return true
+                    end
+                    lastError = "Teleport failed: " .. tostring(tpError)
+                else
+                    lastError = callOk and "OpenRoom rejected elevator " .. tostring(index) or tostring(opened)
+                end
+            else
+                lastError = moveError or lastError
+            end
+        end
+    end
+
+    return false, lastError
+end
+
+function session.auto.waitForReplayWave(action, index, total)
+    local target = math.max(0, math.floor(tonumber(action and action.wave) or 0))
+    while replaying and session.alive do
+        local current = getWave()
+        if current >= target then
+            return true
+        end
+        setReplayStatus(string.format(
+            "%d/%d | waiting wave %d (now %d) | %s",
+            tonumber(index) or 0,
+            tonumber(total) or 0,
+            target,
+            current,
+            tostring(action and action.type or "action")
+        ))
+        task.wait(0.1)
+    end
+    return false
+end
+
+local function getCash()
+    local safe = player:FindFirstChild("LocalSafeData")
+    local cash = safe and safe:FindFirstChild("CashREADONLY")
+    return cash and tonumber(cash.Value) or nil
+end
+
+local function placementCost(unitName)
+    local module = getCTDModule()
+    if module and type(module.gettowerupgradecost) == "function" then
+        local ok, cost = pcall(module.gettowerupgradecost, unitName, player, { InputLevel = 0 })
+        if ok then
+            return tonumber(cost)
+        end
+    end
+end
+
+local function upgradeCost(tower)
+    if not tower or not tower.Parent then
+        return nil
+    end
+
+    local info = tower:FindFirstChild("AdditionalInfo")
+    local value = info and info:FindFirstChild("NextUpgradeCost")
+    local replicatedCost = value and tonumber(value.Value) or nil
+
+    if replicatedCost and replicatedCost >= 0 then
+        return replicatedCost
+    end
+
+    local module = getCTDModule()
+    if module
+        and type(module.getbeyondtowerlevel) == "function"
+        and type(module.gettowerupgradecost) == "function"
+    then
+        local level = getLevel(tower)
+        local okLevel, _, _, nextLevelData = pcall(
+            module.getbeyondtowerlevel,
+            player,
+            tower,
+            level
+        )
+
+        if okLevel and nextLevelData then
+            -- The native hover UI passes the third return from
+            -- getbeyondtowerlevel into gettowerupgradecost with Model=tower.
+            local okCost, cost = pcall(
+                module.gettowerupgradecost,
+                nextLevelData,
+                player,
+                { Model = tower }
+            )
+            if okCost and tonumber(cost) and tonumber(cost) >= 0 then
+                return tonumber(cost)
+            end
+        end
+    end
+
+    return nil
+end
+
+local function waitForMoney(cost)
+    cost = tonumber(cost)
+
+    -- If the game cannot expose a price for this action, do not invent one.
+    -- The remote remains authoritative and the caller will retry on rejection.
+    if cost == nil or cost <= 0 then
+        return replaying and session.alive
+    end
+
+    while replaying and session.alive do
+        local cash = getCash()
+        if cash ~= nil and cash >= cost then
+            return true
+        end
+        task.wait(0.03)
+    end
+
+    return false
+end
+
+local function performPlace(action)
+    local unit = resolveUnit(action.unit, action.source)
+    if not unit then
+        return nil, "unit " .. tostring(action.unit) .. " was not found in saved UnitChoosed/current loadout UI"
+    end
+
+    if not waitForMoney(placementCost(action.unit)) then
+        return nil, "stopped"
+    end
+
+    local position = toVector3(action.position)
+    local surface
+    surface, position = resolveSurface(action.surface, position)
+
+    if not surface then
+        local params = RaycastParams.new()
+        params.FilterType = Enum.RaycastFilterType.Exclude
+        local ignore = {}
+        local towers = getTowers()
+        local map = Workspace:FindFirstChild("Map")
+        local enemies = map and map:FindFirstChild("Enemies")
+        local projectiles = Workspace:FindFirstChild("Projectiles")
+
+        if towers then ignore[#ignore + 1] = towers end
+        if enemies then ignore[#ignore + 1] = enemies end
+        if projectiles then ignore[#ignore + 1] = projectiles end
+        if player.Character then ignore[#ignore + 1] = player.Character end
+        params.FilterDescendantsInstances = ignore
+
+        local hit = Workspace:Raycast(
+            position + Vector3.new(0, 12, 0),
+            Vector3.new(0, -30, 0),
+            params
+        )
+        if hit then
+            surface = hit.Instance
+            position = hit.Position
+        end
+    end
+
+    if not surface then
+        return nil, "placement surface for " .. tostring(action.unit) .. " was not found"
+    end
+
+    local placeUnit = remotes:FindFirstChild("PlaceUnit")
+    if not placeUnit or not placeUnit:IsA("RemoteFunction") then
+        return nil, "Remotes.PlaceUnit is missing"
+    end
+
+    local towers = getTowers()
+    if not towers then
+        return nil, "workspace.Towers is missing"
+    end
+
+    local before = {}
+    for _, tower in ipairs(towers:GetChildren()) do
+        before[tower] = true
+    end
+
+    local placeable = true
+    local module = getCTDModule()
+    local units = ReplicatedStorage:FindFirstChild("Units")
+    local unitFolder = units and units:FindFirstChild(action.unit)
+    local tags = unitFolder and unitFolder:FindFirstChild("Tags")
+
+    if module and type(module.checkcanplace) == "function" and tags then
+        local checked, valid = pcall(module.checkcanplace, player, surface, position, tags, {
+            TowerName = action.unit,
+        })
+        if not checked then
+            return nil, "placement validation failed: " .. tostring(valid)
+        end
+        placeable = valid == true
+    end
+
+
+    if not placeable then
+        return nil, "placement currently invalid"
+    end
+
+
+    local ok, result = pcall(function()
+        return placeUnit:InvokeServer(
+            unit,
+            position,
+            toVector3(action.rotation),
+            placeable,
+            surface
+        )
+    end)
+
+    if not ok then
+        return nil, tostring(result)
+    end
+
+    -- game2 treats nil as a rejected placement. A non-nil response still has
+    -- to be confirmed by the newly-created owned tower.
+    if result == nil then
+        return nil, "server rejected placement"
+    end
+
+
+    local started = os.clock()
+    while replaying and os.clock() - started < 2.5 do
+        if typeof(result) == "Instance"
+            and result.Parent == towers
+            and isMine(result) then
+            return result
+        end
+
+        local best
+        local bestDistance = math.huge
+        for _, tower in ipairs(towers:GetChildren()) do
+            if not before[tower] and tower.Name == action.unit and isMine(tower) then
+                local placedAt = rawPlacementPosition(tower)
+                local distance = placedAt and (placedAt - position).Magnitude or math.huge
+                if distance < bestDistance then
+                    bestDistance = distance
+                    best = tower
+                end
+            end
+        end
+
+        if best and bestDistance <= 8 then
+            return best
+        end
+
+        task.wait()
+    end
+
+    return nil, "placement was not confirmed in workspace.Towers"
+end
+
+local function performUpgrade(tower, desiredLevel)
+    if not tower or not tower.Parent then
+        return false, "tower missing"
+    end
+
+    desiredLevel = tonumber(desiredLevel) or (getLevel(tower) + 1)
+    if getLevel(tower) >= desiredLevel then
+        return true
+    end
+
+    if not waitForMoney(upgradeCost(tower)) then
+        return false, "stopped"
+    end
+
+    if not tower.Parent then
+        return false, "tower missing"
+    end
+
+    local before = getLevel(tower)
+
+    local function waitChanged(seconds)
+        local started = os.clock()
+        while replaying and session.alive and os.clock() - started < seconds do
+            if not tower.Parent then
+                return false, "tower missing"
+            end
+            if getLevel(tower) > before then
+                return true
+            end
+            task.wait()
+        end
+
+        if not tower.Parent then
+            return false, "tower missing"
+        end
+        return getLevel(tower) > before, "server rejected upgrade"
+    end
+
+    -- Exact active game2 path: UpgradeUnit is a RemoteEvent and the native
+    -- hover hotkey simply FireServer(tower).
+    local remote = remotes:FindFirstChild("UpgradeUnit")
+    if remote and remote:IsA("RemoteEvent") then
+        local ok, err = pcall(function()
+            remote:FireServer(tower)
+        end)
+        if not ok then
+            return false, tostring(err)
+        end
+        return waitChanged(1.35)
+    end
+
+    -- Compatibility only for alternate builds.
+    local v2 = remotes:FindFirstChild("UpgradeUnitV2")
+    if v2 and v2:IsA("RemoteFunction") then
+        local ok, success = pcall(function()
+            return v2:InvokeServer(tower)
+        end)
+        if not ok then
+            return false, tostring(success)
+        end
+        if success ~= true then
+            return false, "server rejected upgrade"
+        end
+        return waitChanged(1.35)
+    end
+
+    return false, "Remotes.UpgradeUnit is missing"
+end
+
+local function performTarget(tower, mode)
+    if not tower or not tower.Parent then
+        return false, "tower missing"
+    end
+
+    mode = tostring(mode or "")
+    if getTarget(tower) == mode then
+        return true
+    end
+
+    local remote = remotes:FindFirstChild("TargetUnit")
+    if not remote or not remote:IsA("RemoteFunction") then
+        return false, "Remotes.TargetUnit is missing"
+    end
+
+    -- TargetUnit cycles targeting modes. The native hover UI uses the string
+    -- returned by InvokeServer directly, so use that result instead of blindly
+    -- firing 24 times.
+    for _ = 1, 12 do
+        if not replaying or not session.alive then
+            return false, "stopped"
+        end
+        if not tower.Parent then
+            return false, "tower missing"
+        end
+
+        local ok, returnedMode = pcall(function()
+            return remote:InvokeServer(tower)
+        end)
+        if not ok then
+            return false, tostring(returnedMode)
+        end
+
+        if tostring(returnedMode) == mode then
+            return true
+        end
+
+        task.wait(0.04)
+
+        if getTarget(tower) == mode then
+            return true

@@ -1,5 +1,5 @@
 -- XOMA / CTDIG bootstrap
--- Build: PASS18-NILCALL-PLACEDIAG-V28
+-- Build: PASS19-NATIVE-PLACE-RAYCAST-V29
 -- Reuses an already-loaded XOMA session so strategy files can be executed
 -- directly by the Player without recursively rebuilding/cleaning the hub.
 
@@ -84,8 +84,8 @@ coreSource = coreSource:gsub(
 )
 
 -- Saved Obsidian config invokes OnChanged callbacks through SafeCallback/RunChanged.
--- In some builds the optional combat cleanup helpers are absent at callback time.
--- Guard those two callbacks instead of letting config load throw `attempt to call a nil value`.
+-- Optional combat cleanup helpers may be absent in a particular build, so do not
+-- let config load die on a nil helper.
 coreSource = coreSource:gsub(
     "if not session%.combatTowerDpsEnabled then%s+session%.visuals%.clearDpsGuis%(%s*%)%s+end",
     [[if not session.combatTowerDpsEnabled then
@@ -105,9 +105,51 @@ coreSource = coreSource:gsub(
     1
 )
 
+-- The live UnitPlaceScript does not use a generic raycast ignore list. It uses
+-- CTDModule.getplacementmouseignores().Normal/Path, then checkcanplace() and the
+-- exact PlaceUnit(unit, position, rotation, placeable, surface) signature. Merge
+-- that native ignore list into replay's downward reconstruction. Locals live in
+-- the nested pcall closure, so this does not increase the giant core function's
+-- local-register count.
+coreSource = coreSource:gsub(
+    "if player%.Character then ignore%[#ignore % + 1%] = player%.Character end%s+params%.FilterDescendantsInstances = ignore",
+    [[if player.Character then ignore[#ignore + 1] = player.Character end
+
+        pcall(function()
+            local placementModule = getCTDModule()
+            local placementUnits = ReplicatedStorage:FindFirstChild("Units")
+            local placementFolder = placementUnits and placementUnits:FindFirstChild(action.unit)
+            local placementTags = placementFolder and placementFolder:FindFirstChild("Tags")
+
+            if placementModule
+                and type(placementModule.getplacementmouseignores) == "function"
+                and placementTags
+            then
+                local nativeIgnores = placementModule.getplacementmouseignores()
+                local nativeList = placementTags:FindFirstChild("Path")
+                    and nativeIgnores.Path
+                    or nativeIgnores.Normal
+
+                if type(nativeList) == "table" then
+                    for _, object in ipairs(nativeList) do
+                        if typeof(object) == "Instance" and not table.find(ignore, object) then
+                            ignore[#ignore + 1] = object
+                        end
+                    end
+                end
+            end
+
+            if unit and typeof(unit) == "Instance" and not table.find(ignore, unit) then
+                ignore[#ignore + 1] = unit
+            end
+        end)
+
+        params.FilterDescendantsInstances = ignore]],
+    1
+)
+
 -- Replay status can be unavailable from an executor thread, so print the actual
--- Place failure as well. This distinguishes money, checkcanplace, surface and
--- server rejection without changing Recorder/Replay semantics.
+-- Place failure as well. This distinguishes checkcanplace, surface and server rejection.
 coreSource = coreSource:gsub(
     "local tower, placeError = performPlace%(action%)",
     [[local tower, placeError = performPlace(action)
@@ -141,7 +183,7 @@ local XOMA = coreChunk()
 local activeSession = environment.CTDIG_SESSION
 if type(activeSession) == "table" then
     activeSession.dataModel = game
-    activeSession.bootstrapBuild = "PASS18-NILCALL-PLACEDIAG-V28"
+    activeSession.bootstrapBuild = "PASS19-NATIVE-PLACE-RAYCAST-V29"
 end
 
 local autoexecSource = game:HttpGet(

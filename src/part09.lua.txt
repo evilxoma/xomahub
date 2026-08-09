@@ -34,6 +34,9 @@ local function bindTarget(tower)
     end
 
     local state = ensureTowerState(tower)
+
+    -- OtherConfig and Targets can replicate a little later than Configuration.
+    -- Listen to the nested container itself so a quick target click is not lost.
     local otherWatcher = towerConnections[tower] and towerConnections[tower].target_container
     if state.boundOtherConfig ~= other or not (otherWatcher and otherWatcher.Connected) then
         state.boundOtherConfig = other
@@ -200,6 +203,8 @@ local function rememberSelection()
             capturePlacementAttempt()
         end
         if value ~= true and placementAttempt then
+            -- Keep the attempt briefly as metadata only. A real tower appearing in
+            -- workspace.Towers is the actual success confirmation.
             if recording and not placementAttempt.claimed then
                 recentPlacement = placementAttempt
             end
@@ -254,6 +259,8 @@ local function skipDetected(wave, source)
 
     wave = math.max(0, math.floor(tonumber(wave) or 0))
 
+    -- WaveTimeSkipped and AutoSkippedWaves describe the same successful skip
+    -- and can replicate on opposite sides of the Wave increment.
     if lastSkipConfirmationWave
         and now - lastSkipConfirmationAt <= 0.75
         and math.abs(wave - lastSkipConfirmationWave) <= 1 then
@@ -280,6 +287,10 @@ local function resolveSellTowerFromButton(button)
         return nil
     end
 
+    -- The game's real RemoveButton LocalScript uses:
+    -- script.Parent.Parent.Parent.Data.Object.Value
+    -- Walk a few ancestors instead of hardcoding one UI branch so the recorder
+    -- survives harmless GUI nesting changes.
     local node = button.Parent
     for _ = 1, 6 do
         if not node then
@@ -308,6 +319,8 @@ local function recordSellIntent(tower, source)
         return true
     end
 
+    -- If the tower was placed only moments ago, confirm its Place before the
+    -- server removes it. Otherwise a SELL could become an orphan pending action.
     if not ids[tower] then
         local placement = manualPlacementFor(tower.Name)
         recordPlace(tower, placement)
@@ -340,6 +353,9 @@ local function bindSellButton(button)
     end
     bindings.sellButtons[button] = true
 
+    -- MouseButton1Down fires before the game's MouseButton1Click handler calls
+    -- RemoveUnit:FireServer(), so the tower still exists and its recorder id is
+    -- available. Activated covers touch/gamepad. recordSellIntent deduplicates.
     connect(button.MouseButton1Down, function()
         local tower = resolveSellTowerFromButton(button)
         if tower then
@@ -376,6 +392,11 @@ local function bindSellUi()
     end
 end
 
+
+-- Recorder input support ------------------------------------------------------
+-- The game itself uses PlayerData.Settings hotkeys.  We only OBSERVE those
+-- inputs; we never consume them, change input state, or intercept remotes.
+
 local function guiTreeEnabled(object)
     local node = object
     while node and node ~= playerGui do
@@ -410,6 +431,7 @@ local function selectedTowerFromGui()
         return nil
     end
 
+    -- Prefer the two real management GUIs used by the saved game.
     for _, name in ipairs({ "TowerManageGui", "UpgradeGui" }) do
         local gui = playerGui:FindFirstChild(name)
         if gui and guiTreeEnabled(gui) then
@@ -420,6 +442,8 @@ local function selectedTowerFromGui()
         end
     end
 
+    -- Some game variants wrap the management frame differently.  Resolve the
+    -- same Data.Object pattern without guessing one exact nesting path.
     local fallback
     for _, object in ipairs(playerGui:GetDescendants()) do
         if object:IsA("ObjectValue") and object.Name == "Object" then

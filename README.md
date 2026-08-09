@@ -16,19 +16,20 @@ local XOMA = loadstring(game:HttpGet(
 
 Put the generated strategy file (for example `ctdig.lua`) into your executor's `autoexec` / `autoexecute` folder.
 
-V17 routes `XOMA:Run()` by place automatically:
+V19 routes `XOMA:Run()` by place automatically:
 
-- In lobby: wait for lobby data, verify the exact recorded deck, equip the matching saved loadout if needed, enter a free room-system elevator, open the recorded map with `FriendsOnly`, `Limit = 1`, `Classic`, then request teleport.
-- After Roblox teleports: the executor runs the same strategy from autoexec again. XOMA detects the match, waits for `Towers`, `Map.Configuration`, `PlayerData.Loadout`, map name and deck replication, binds match sources, then starts Replay.
-- Wrong map or wrong deck does not silently run the strategy.
-
-The lobby flow mirrors the game's `PlayerLoadouts(..., "EquipLoadout")` and `Remotes.Elevators:InvokeServer(room, "OpenRoom", payload)` / `"Teleport"` paths.
+- In lobby: verify/equip the recorded deck, enter a free room-system elevator, open the recorded map with `FriendsOnly`, `Limit = 1`, `Classic`, then request teleport.
+- In the match pre-game: press the game's real `Ready Up` GUI, select the recorded difficulty, wait until the voting/countdown phase is finished, and only then start Replay.
+- Replay does not send a W0 Place while `Game Begins in ...` is still active.
+- New Recorder strategies store difficulty before the loader so voting can start while the core is downloading.
+- Old strategies without a stored difficulty stay compatible and default to the current/Normal difficulty.
 
 ## Strategy API
 
 ```lua
 XOMA:Map("Map Name")
 XOMA:Deck({ "Bandit" })
+XOMA:Difficulty("Normal")
 XOMA:Config({ AutoRetry = true, AutoBackToLobby = false })
 
 local U1 = XOMA:Place("Bandit", Vector3.new(0, 0, 0), 1, Vector3.new(0, 0, 0))
@@ -44,4 +45,4 @@ XOMA:Run()
 
 The webhook reports per-run Coins, Coins/hour, EXP, EXP/hour, plus cumulative session runs, wins/losses, win rate, total Coins/EXP, session Coins/hour and EXP/hour, runtime, and average run duration.
 
-Current build: `PASS7-AUTOEXEC-V17`.
+Current build: `PASS9-PREGAME-READY-V19`.

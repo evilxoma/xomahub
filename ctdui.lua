@@ -1,5 +1,5 @@
 -- XOMA / CTDIG bootstrap
--- Build: PASS17-W0-PREGAME-V27
+-- Build: PASS18-NILCALL-PLACEDIAG-V28
 -- Reuses an already-loaded XOMA session so strategy files can be executed
 -- directly by the Player without recursively rebuilding/cleaning the hub.
 
@@ -12,9 +12,6 @@ if type(existingSession) == "table"
     and type(existingSession.XOMA) == "table"
     and type(existingSession.XOMA.Run) == "function"
 then
-    -- A recorder strategy always calls ctdui.lua before declaring its actions.
-    -- When the hub is already alive in THIS DataModel (Replay button), reuse it
-    -- but give the strategy a clean builder so previous actions never duplicate.
     existingSession.XOMA._macro = {
         version = 1,
         map = "Unknown",
@@ -25,10 +22,6 @@ then
     existingSession.XOMA._nextId = 0
     return existingSession.XOMA
 end
-
--- Do not synthesize any user input during bootstrap. The macro only stores its
--- wanted difficulty in XOMA_AUTOEXEC_PREFLIGHT here. Ready/difficulty handling
--- is installed after core startup by the ready patch.
 
 local function fetchParts(base, count, workers)
     local parts = table.create(count)
@@ -78,10 +71,7 @@ local coreSource = fetchParts(
     4
 )
 
--- Replay can run from an executor thread that is allowed to control the game but
--- not allowed to mutate Obsidian's internal Plugin-capability UI Instances.
--- Status text is non-essential, so make the two SetText calls inside the shared
--- setLabelText helper non-fatal. This keeps W0 Place/Upgrade execution alive.
+-- Obsidian status widgets are non-essential and can be Plugin-capability objects.
 coreSource = coreSource:gsub(
     "label:SetText%(text%)",
     "pcall(label.SetText, label, text)",
@@ -93,17 +83,65 @@ coreSource = coreSource:gsub(
     1
 )
 
+-- Saved Obsidian config invokes OnChanged callbacks through SafeCallback/RunChanged.
+-- In some builds the optional combat cleanup helpers are absent at callback time.
+-- Guard those two callbacks instead of letting config load throw `attempt to call a nil value`.
+coreSource = coreSource:gsub(
+    "if not session%.combatTowerDpsEnabled then%s+session%.visuals%.clearDpsGuis%(%s*%)%s+end",
+    [[if not session.combatTowerDpsEnabled then
+            if type(session.visuals.clearDpsGuis) == "function" then
+                session.visuals.clearDpsGuis()
+            end
+        end]],
+    1
+)
+coreSource = coreSource:gsub(
+    "if not session%.combatKillPreviewEnabled then%s+session%.visuals%.clearKillHighlights%(%s*%)%s+end",
+    [[if not session.combatKillPreviewEnabled then
+            if type(session.visuals.clearKillHighlights) == "function" then
+                session.visuals.clearKillHighlights()
+            end
+        end]],
+    1
+)
+
+-- Replay status can be unavailable from an executor thread, so print the actual
+-- Place failure as well. This distinguishes money, checkcanplace, surface and
+-- server rejection without changing Recorder/Replay semantics.
+coreSource = coreSource:gsub(
+    "local tower, placeError = performPlace%(action%)",
+    [[local tower, placeError = performPlace(action)
+                if not tower then
+                    warn("[XOMA PLACE] " .. tostring(placeError))
+                end]],
+    1
+)
+coreSource = coreSource:gsub(
+    'return nil, "placement currently invalid"',
+    'return nil, "placement currently invalid | surface=" .. tostring(surface and surface:GetFullName()) .. " | pos=" .. tostring(position)',
+    1
+)
+coreSource = coreSource:gsub(
+    'return nil, "server rejected placement"',
+    'return nil, "server rejected placement | surface=" .. tostring(surface and surface:GetFullName()) .. " | pos=" .. tostring(position) .. " | unit=" .. tostring(unit and unit:GetFullName())',
+    1
+)
+coreSource = coreSource:gsub(
+    'return nil, "placement validation failed: " .. tostring%(valid%)',
+    'return nil, "placement validation failed: " .. tostring(valid) .. " | surface=" .. tostring(surface and surface:GetFullName()) .. " | pos=" .. tostring(position)',
+    1
+)
+
 local coreChunk, coreError = loadstring(coreSource)
 if not coreChunk then
     error("XOMA core compile failed: " .. tostring(coreError))
 end
 local XOMA = coreChunk()
 
--- Mark the live CTDIG session with the exact DataModel. This prevents a stale
--- executor environment from reusing a session created before a Roblox teleport.
 local activeSession = environment.CTDIG_SESSION
 if type(activeSession) == "table" then
     activeSession.dataModel = game
+    activeSession.bootstrapBuild = "PASS18-NILCALL-PLACEDIAG-V28"
 end
 
 local autoexecSource = game:HttpGet(

@@ -24,7 +24,7 @@ session.visuals = {
     looksLikeRuntimeEnemy = looksLikeRuntimeEnemy,
     towerDPS = towerDPS,
     towerCombatStats = towerCombatStats,
-    sampleTowerLiveDPS = sampleTowerLiveDPS,
+    sampleTowerLiveDPS = sampleTowerLiveDPS, -- compatibility only; not used by prediction/display
     ensureDpsGui = ensureDpsGui,
     clearDpsGuis = clearDpsGuis,
     clearKillHighlights = clearKillHighlights,
@@ -158,6 +158,8 @@ local function resolveUnit(unitName, source)
         return saved
     end
 
+    -- game2 itself uses ReplicatedStorage.Units[name].Levels["0"].Object[name]
+    -- as a valid UnitChoosed/placeUnitHint object, so this is the stable replay path.
     local canonical = canonicalUnitObject(unitName)
     if canonical then
         resolvedUnits[unitName] = canonical
@@ -311,6 +313,7 @@ local function queueTowerAction(tower, action)
         session.pendingTowerActions[tower] = pending
     end
 
+    -- Avoid duplicate queued target/sell states caused by replication rebinding.
     local previous = pending[#pending]
     if previous and previous.type == action.type then
         if action.type == "target" and previous.mode == action.mode then
@@ -406,6 +409,10 @@ local function recordPlace(tower, placement)
     ids[tower] = id
 
     local state = ensureTowerState(tower)
+
+    -- TowerInitialLevelSet is created by the game when a tower genuinely starts
+    -- above level 0. Using the live Level here can accidentally bake an upgrade
+    -- into PLACE if replication was slow and the player upgraded immediately.
     local initialLevelMarker = tower:FindFirstChild("TowerInitialLevelSet")
     local initialLevel = initialLevelMarker and tonumber(initialLevelMarker.Value) or 0
     local canonical = canonicalUnitObject(tower.Name)
@@ -439,6 +446,8 @@ local function recordPlace(tower, placement)
 
     flushTowerActions(tower)
 
+    -- Final reconciliation repairs an upgrade/target change that happened before
+    -- its observer finished binding, without relying on remote interception.
     local liveLevel = getLevel(tower)
     if liveLevel > (tonumber(state.recordedLevel) or 0) then
         state.recordedLevel = liveLevel

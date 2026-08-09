@@ -134,8 +134,38 @@ local function saveMacro()
     lines[#lines + 1] = "    AutoBackToLobby = " .. tostring(Toggles.CTDIGAutoBackLobby and Toggles.CTDIGAutoBackLobby.Value == true or false) .. ","
     lines[#lines + 1] = "})"
 
-    local previousWave = nil
+    -- Final invariant: even if Roblox delivers an unexpected stale callback
+    -- during Stop & Save, never serialize Upgrade/Target/Ability after SELL for
+    -- the same recorder id. New placements always use a new U# and are unaffected.
+    local soldIds = {}
+    local serializableActions = {}
     for _, action in ipairs(actions) do
+        local id = action.id
+        local blocked = id ~= nil
+            and soldIds[id] == true
+            and (
+                action.type == "upgrade"
+                or action.type == "target"
+                or action.type == "ability"
+            )
+
+        if not blocked then
+            serializableActions[#serializableActions + 1] = action
+            if action.type == "sell" and id ~= nil then
+                soldIds[id] = true
+            end
+        else
+            debugLog(
+                "save guard removed post-sell "
+                    .. tostring(action.type)
+                    .. " for #"
+                    .. tostring(id)
+            )
+        end
+    end
+
+    local previousWave = nil
+    for _, action in ipairs(serializableActions) do
         local wave = math.max(0, math.floor(tonumber(action.wave) or 0))
         if previousWave ~= wave then
             lines[#lines + 1] = ""
@@ -271,7 +301,7 @@ local function saveMacro()
 
     notify(
         "Macro saved",
-        string.format("workspace/%s -> XOMA autoexec | %d actions | %d bytes", MACRO_FILE, #actions, #content),
+        string.format("workspace/%s -> XOMA autoexec | %d actions | %d bytes", MACRO_FILE, #serializableActions, #content),
         5
     )
     return true

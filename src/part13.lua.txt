@@ -1,0 +1,500 @@
+        end
+    end
+
+    return false, "target mode was not reached"
+end
+
+local function performAbility(tower, ability)
+    if not tower or not tower.Parent then
+        return false, "tower missing"
+    end
+
+    local module = getCTDModule()
+    local cooldown = tower:FindFirstChild(ability .. "Cooldown")
+
+    if not cooldown and module and type(module.DoTowerAbilities) == "function" then
+        pcall(module.DoTowerAbilities, tower, "Initialize", {})
+        cooldown = tower:FindFirstChild(ability .. "Cooldown")
+    end
+
+    if cooldown and tonumber(cooldown.Value) and cooldown.Value > 0 then
+        return false, "ability cooldown"
+    end
+
+    local before = cooldown and tonumber(cooldown.Value) or 0
+    local fired = false
+
+    if module and type(module.DoTowerAbilities) == "function" then
+        fired = pcall(module.DoTowerAbilities, tower, "ActivateAbility", {
+            abilitycode = ability,
+        })
+    else
+        local remote = remotes:FindFirstChild("CTDModuleActivateSkillServer")
+        if remote and remote:IsA("RemoteEvent") then
+            remote:FireServer(tower, "ActivateAbility", {
+                abilitycode = ability,
+            })
+            fired = true
+        end
+    end
+
+    if not fired then
+        return false, "ability handler is missing"
+    end
+
+    if not cooldown then
+        return true
+    end
+
+    local started = os.clock()
+    while replaying and session.alive and os.clock() - started < 0.8 do
+        if not tower.Parent then
+            return false, "tower missing"
+        end
+        if tonumber(cooldown.Value) and cooldown.Value > before then
+            return true
+        end
+        task.wait()
+    end
+
+    if not tower.Parent then
+        return false, "tower missing"
+    end
+    return false, "ability not ready"
+end
+
+local function performSell(tower)
+    if not tower or not tower.Parent then
+        return true
+    end
+
+    local remote = remotes:FindFirstChild("RemoveUnit")
+    if not remote or not remote:IsA("RemoteEvent") then
+        return false, "Remotes.RemoveUnit is missing"
+    end
+
+    local ok, err = pcall(function()
+        remote:FireServer(tower)
+    end)
+    if not ok then
+        return false, tostring(err)
+    end
+
+    local started = os.clock()
+    while tower.Parent and os.clock() - started < 2 do
+        task.wait()
+    end
+
+    return not tower.Parent, "server rejected sell"
+end
+
+local function performSkip()
+    local gameVals = getGameVals()
+    local able = gameVals and gameVals:FindFirstChild("AbleToSkip")
+    local waveTimeSkipped = gameVals and gameVals:FindFirstChild("WaveTimeSkipped")
+    local map = Workspace:FindFirstChild("Map")
+
+    local started = os.clock()
+    while replaying and os.clock() - started < 45 do
+        if (able and able.Value == true) or (map and map:FindFirstChild("CanSkip")) then
+            break
+        end
+        task.wait(0.05)
+    end
+
+    if not replaying then
+        return false, "stopped"
+    end
+
+    if not ((able and able.Value == true) or (map and map:FindFirstChild("CanSkip"))) then
+        return false, "skip never became available"
+    end
+
+    local setting = getNativeAutoSkipSetting()
+    local wasEnabled = setting and setting.Value == true or false
+    local keepEnabled = Toggles.CTDIGAutoSkip and Toggles.CTDIGAutoSkip.Value == true or false
+    local beforeWave = getWave()
+    local beforeSkipped = waveTimeSkipped and tonumber(waveTimeSkipped.Value) or nil
+
+    local ok, err = setNativeAutoSkip(true)
+    if not ok then
+        return false, err
+    end
+
+    local confirmed = false
+    started = os.clock()
+    while replaying and os.clock() - started < 8 do
+        if getWave() ~= beforeWave then
+            confirmed = true
+            break
+        end
+
+        if beforeSkipped and waveTimeSkipped and tonumber(waveTimeSkipped.Value) > beforeSkipped then
+            confirmed = true
+            break
+        end
+
+        task.wait(0.05)
+    end
+
+    if not wasEnabled and not keepEnabled then
+        setNativeAutoSkip(false)
+    end
+
+    return confirmed, confirmed and nil or "skip was not confirmed"
+end
+
+local function setEndActionStatus(text)
+    pcall(function()
+        if endActionLabel and type(endActionLabel.SetText) == "function" then
+            endActionLabel:SetText(text)
+        elseif Options.CTDIGEndAction and type(Options.CTDIGEndAction.SetText) == "function" then
+            Options.CTDIGEndAction:SetText(text)
+        end
+    end)
+end
+
+local function findEndScreenButton(name)
+    local function hierarchyEnabled(button)
+        local object = button
+        while object and object ~= playerGui do
+            if object:IsA("GuiObject") and object.Visible == false then
+                return false
+            end
+            if object:IsA("LayerCollector") and object.Enabled == false then
+                return false
+            end
+            object = object.Parent
+        end
+        return true
+    end
+
+    local best
+    local bestScore = -math.huge
+    for _, descendant in ipairs(playerGui:GetDescendants()) do
+        if descendant:IsA("GuiButton") and descendant.Name == name then
+            local endFrame = descendant:FindFirstAncestor("EndFrame")
+            if endFrame then
+                local score = 0
+                if descendant.Visible then score = score + 2 end
+                if descendant.Active then score = score + 4 end
+                if hierarchyEnabled(descendant) then score = score + 8 end
+                if descendant.AbsoluteSize.X > 1 and descendant.AbsoluteSize.Y > 1 then score = score + 1 end
+                if endFrame:IsA("ScreenGui") and endFrame.Enabled then score = score + 8 end
+                if score > bestScore then
+                    bestScore = score
+                    best = descendant
+                end
+            end
+        end
+    end
+    return best, bestScore
+end
+
+local function fireGuiButton(button, attempt)
+    if not button or not button.Parent then
+        return false, "button missing"
+    end
+
+    local function executorFunction(name)
+        local env = typeof(getgenv) == "function" and getgenv() or _G
+        local value = rawget(env, name) or rawget(_G, name)
+        return type(value) == "function" and value or nil
+    end
+
+    local function fireConnectionObject(connection)
+        if not connection then
+            return false
+        end
+        if type(connection.Fire) == "function" and pcall(connection.Fire, connection) then
+            return true
+        end
+        if type(connection.Function) == "function" and pcall(connection.Function) then
+            return true
+        end
+        return false
+    end
+
+    -- MouseButton1Click and Activated are the only signals that represent a
+    -- completed GUI click. Do not cycle MouseButton1Down/Up: doing that on the
+    -- Restart vote can create duplicate/toggle-like behavior.
+    local candidates = {
+        { name = "MouseButton1Click", signal = button.MouseButton1Click },
+        { name = "Activated", signal = button.Activated },
+    }
+
+    local getConnections = executorFunction("getconnections")
+    if getConnections then
+        for _, candidate in ipairs(candidates) do
+            local okConnections, signalConnections = pcall(getConnections, candidate.signal)
+            if okConnections and type(signalConnections) == "table" then
+                local fired = 0
+                for _, connection in ipairs(signalConnections) do
+                    if fireConnectionObject(connection) then
+                        fired = fired + 1
+                    end
+                end
+                if fired > 0 then
+                    return true, candidate.name .. ":connections=" .. tostring(fired)
+                end
+            end
+        end
+    end
+
+    local fireSignal = executorFunction("firesignal")
+    if fireSignal then
+        for _, candidate in ipairs(candidates) do
+            local ok, err = pcall(fireSignal, candidate.signal)
+            if ok then
+                return true, candidate.name .. ":firesignal"
+            end
+            if err then
+                -- continue to the other completed-click signal
+            end
+        end
+    end
+
+    return false, "no usable click signal"
+end
+
+local function handleEndAction()
+    local function hierarchyEnabled(button)
+        local object = button
+        while object and object ~= playerGui do
+            if object:IsA("GuiObject") and object.Visible == false then
+                return false
+            end
+            if object:IsA("LayerCollector") and object.Enabled == false then
+                return false
+            end
+            object = object.Parent
+        end
+        return true
+    end
+
+    local control = session.endAction
+    if control.busy or not session.alive then
+        return
+    end
+
+    -- Native EndFrame is only enabled after the result screen is created.
+    local endFrame = playerGui:FindFirstChild("EndFrame", true)
+    if not endFrame or (endFrame:IsA("ScreenGui") and not endFrame.Enabled) then
+        session.observeWebhookResult(nil, nil)
+        return
+    end
+
+    local resultValue = player:FindFirstChild("PlayerGameResult")
+    local result = resultValue and tostring(resultValue.Value) or ""
+    if result ~= "Defeat" and result ~= "Triumph" then
+        local service = Workspace:FindFirstChild("WorkspaceScriptService")
+        local rewards = service and service:FindFirstChild("Rewards")
+        local rewardResult = rewards and rewards:FindFirstChild("Result")
+        result = rewardResult and tostring(rewardResult.Value) or result
+    end
+
+    if result ~= "Defeat" and result ~= "Triumph" then
+        session.observeWebhookResult(nil, nil)
+        return
+    end
+
+    -- Webhook is independent from Auto Retry / Auto Lobby.
+    session.observeWebhookResult(endFrame, result)
+
+    local autoRetry = Toggles.CTDIGAutoRetry and Toggles.CTDIGAutoRetry.Value == true
+    local autoLobby = Toggles.CTDIGAutoBackLobby and Toggles.CTDIGAutoBackLobby.Value == true
+    if not autoRetry and not autoLobby then
+        control.key = nil
+        control.confirmed = false
+        control.requested = false
+        return
+    end
+
+    -- Match is over: no replay action should keep waiting for money/cooldown.
+    if replaying then
+        replayStopRequested = true
+        replaying = false
+    end
+
+    local actionName = autoRetry and "Restart" or "Return"
+    local markerName = autoRetry and "Restarted" or "Teleported"
+    local key = result .. ":" .. actionName
+    local now = os.clock()
+
+    if control.key ~= key then
+        control.key = key
+        control.attempts = 0
+        control.nextAttempt = 0
+        control.startedAt = now
+        control.confirmed = false
+        control.requested = false
+        control.requestedAt = 0
+        control.requestText = nil
+    end
+
+    -- The game's EndFrame script watches these exact marker children.
+    if endFrame:FindFirstChild(markerName, true) then
+        control.confirmed = true
+        control.requested = true
+        setEndActionStatus((autoRetry and "Auto Retry" or "Auto Lobby") .. ": confirmed")
+        return
+    end
+
+    if control.confirmed then
+        return
+    end
+
+    local button = findEndScreenButton(actionName)
+    if not button then
+        control.nextAttempt = now + 0.2
+        setEndActionStatus((autoRetry and "Auto Retry" or "Auto Lobby") .. ": waiting for result button")
+        return
+    end
+
+    -- Restart is a vote button ("Restart? (x/y)"). After our click changes the
+    -- text, NEVER click it again while waiting for the other players.
+    if control.requested then
+        local currentText = tostring(button.Text or "")
+        if control.requestText and currentText ~= control.requestText then
+            setEndActionStatus(
+                (autoRetry and "Auto Retry" or "Auto Lobby")
+                .. ": request accepted | waiting server"
+            )
+            return
+        end
+
+        if button.Active == false then
+            setEndActionStatus(
+                (autoRetry and "Auto Retry" or "Auto Lobby")
+                .. ": request accepted | waiting server"
+            )
+            return
+        end
+
+        -- If nothing changed at all, the executor signal probably did not reach
+        -- the game's handler. Retry another completed-click signal after a delay.
+        if now - (control.requestedAt or 0) < 2.0 then
+            setEndActionStatus(
+                (autoRetry and "Auto Retry" or "Auto Lobby")
+                .. ": requested | awaiting confirmation"
+            )
+            return
+        end
+
+        control.requested = false
+        control.nextAttempt = now
+    end
+
+    if now < (control.nextAttempt or 0) then
+        return
+    end
+
+    if not button.Active or not hierarchyEnabled(button) then
+        control.nextAttempt = now + 0.15
+        setEndActionStatus((autoRetry and "Auto Retry" or "Auto Lobby") .. ": waiting for button activation")
+        return
+    end
+
+    control.busy = true
+    control.attempts = (control.attempts or 0) + 1
+    local beforeText = tostring(button.Text or "")
+
+    setEndActionStatus(string.format(
+        "%s: request %d",
+        autoRetry and "Auto Retry" or "Auto Lobby",
+        control.attempts
+    ))
+
+    local ok, detail = fireGuiButton(button, control.attempts)
+    if ok then
+        control.requested = true
+        control.requestedAt = os.clock()
+        control.requestText = beforeText
+        control.nextAttempt = control.requestedAt + 2.0
+
+        if control.attempts == 1 then
+            notify(
+                autoRetry and "Auto Retry" or "Auto Lobby",
+                autoRetry and "Restart requested" or "Exit to Lobby requested",
+                3
+            )
+        end
+
+        setEndActionStatus(string.format(
+            "%s: sent via %s",
+            autoRetry and "Auto Retry" or "Auto Lobby",
+            tostring(detail)
+        ))
+    else
+        control.nextAttempt = os.clock() + 0.5
+        setEndActionStatus(
+            (autoRetry and "Auto Retry" or "Auto Lobby") .. ": " .. tostring(detail)
+        )
+    end
+
+    control.busy = false
+end
+
+local function isFatalReplayError(err)
+    err = tostring(err or "")
+    return err:find("was not found", 1, true)
+        or err:find("surface for", 1, true)
+        or err:find(" is missing", 1, true)
+        or err:find("handler is missing", 1, true)
+        or err:find("unsupported action", 1, true)
+end
+
+local function replayBackoff(retries)
+    retries = math.max(1, tonumber(retries) or 1)
+    return math.min(1.5, 0.1 * (1.18 ^ math.min(retries, 18)))
+end
+
+local function replayMacro(overrideMacro)
+    if replaying or replayTaskRunning then
+        return
+    end
+
+    if recording then
+        notify("Replay error", "Stop and save the active recording first", 4)
+        return
+    end
+
+    local macro = overrideMacro
+    local err
+    if type(macro) ~= "table" or type(macro.actions) ~= "table" then
+        macro, err = loadMacro()
+    end
+    if not macro then
+        notify("Replay error", err, 5)
+        setReplayStatus("Error: " .. tostring(err))
+        return
+    end
+
+    local currentMap = getMapName()
+    if macro.map and macro.map ~= "" and macro.map ~= "Unknown" and currentMap ~= macro.map then
+        notify("Wrong map", "Macro: " .. macro.map .. " | Current: " .. currentMap, 6)
+        setReplayStatus("Wrong map")
+        return
+    end
+
+    local deckOk, deckError = session.auto.verifyCurrentMacroDeck(macro)
+    if not deckOk then
+        notify("Wrong deck", deckError, 7)
+        setReplayStatus("Wrong deck: " .. tostring(deckError))
+        return
+    end
+
+    local placeById = {}
+    for _, action in ipairs(macro.actions) do
+        if action.type == "place" and action.id then
+            placeById[action.id] = action
+        end
+    end
+
+    resolvedUnits = {}
+    local runtime = {}
+    replayStopRequested = false
+    replayTaskRunning = true
+    replaying = true
+    setRecorderState("replaying")
+    setReplayStatus(string.format("Starting | 0/%d", #macro.actions))

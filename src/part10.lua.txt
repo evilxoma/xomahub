@@ -34,6 +34,8 @@ local function recordTargetHotkeyIntent(tower, source)
         while session.alive and recording and tower.Parent and os.clock() - started < 0.8 do
             local mode = getTarget(tower)
             if mode and mode ~= before then
+                -- bindTarget normally records first. If replication replaced the
+                -- target Value before its Changed connection fired, recover here.
                 if state.target ~= mode then
                     state.target = mode
                     queueTowerAction(tower, {
@@ -60,7 +62,7 @@ local function recordAbilityHotkeyIntent(tower, ability, source)
     bindCooldown(tower, cooldown)
     local before = tonumber(cooldown.Value) or 0
     if before > 0 then
-        return
+        return -- key press while still cooling down is not a successful ability
     end
 
     local state = ensureTowerState(tower)
@@ -144,6 +146,7 @@ local function bindRecorderHotkeys()
         if not session.alive or not recording or replaying then
             return
         end
+        -- Do not turn typing in a TextBox into macro actions.
         if UserInputService:GetFocusedTextBox() then
             return
         end
@@ -159,12 +162,16 @@ local function bindRecorderHotkeys()
             return
         end
 
+        -- Sell is executed by the game through RemoveUnit directly from the
+        -- hotkey, so record the intent before the tower disappears.
         if settingMatchesHotkey(settings, "SellHotkey", key)
             or input.KeyCode == Enum.KeyCode.ButtonY then
             recordSellIntent(tower, "SellHotkey:" .. key)
             return
         end
 
+        -- Upgrade is supported BOTH from the real hotkey and UpgradeButton,
+        -- but only recorded after Configuration.Level actually increases.
         if settingMatchesHotkey(settings, "UpgradeHotkey", key)
             or input.KeyCode == Enum.KeyCode.ButtonA then
             recordUpgradeIntent(tower, "UpgradeHotkey:" .. key)
@@ -176,6 +183,8 @@ local function bindRecorderHotkeys()
             return
         end
 
+        -- Ability hotkeys are dynamic in Settings. Confirm success from the
+        -- cooldown transition so pressing a key while on cooldown is not saved.
         for abilityIndex = 1, 9 do
             local settingName = "Ability" .. abilityIndex .. "Hotkey"
             if settingMatchesHotkey(settings, settingName, key) then
@@ -251,6 +260,8 @@ local function bindTower(tower)
     end
 
     towerConnect(tower, tower:GetAttributeChangedSignal("AlreadyBeingSold"), observeSellMarker, "sold")
+    -- The marker only exists for about 0.1s in game2. If binding happened in
+    -- the middle of that window, read the current attribute immediately too.
     observeSellMarker()
 
     towerConnect(tower, tower.AncestryChanged, function()
@@ -275,6 +286,9 @@ local function onTowerPlaced(tower)
                 return
             end
 
+            -- game2 can create TowerPlaced before the tower, Owner and
+            -- PlacedOnPart finish replicating. Wait for the authoritative
+            -- workspace.Towers instance instead of serializing a partial clone.
             local started = os.clock()
             while session.alive and os.clock() - started < 5 do
                 local placedOnPart = tower:FindFirstChild("PlacedOnPart")
@@ -319,7 +333,7 @@ local function bindGameSources()
     end
 
     local detects = getDetects()
-    bindSellUi()
+    bindSellUi() -- legacy/button fallback
     bindRecorderActionUi()
     bindRecorderHotkeys()
 

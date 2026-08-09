@@ -1,8 +1,7 @@
 -- XOMA unified Player patch
--- Build: PASS10-UNIFIED-PLAYER-V20
--- Makes the Replay button execute the same recorder-generated XOMA strategy
--- format that autoexecute uses, while table-backed internal replay calls still
--- go directly to the original replay engine.
+-- Build: PASS11-UNIFIED-PLAYER-READY-V21
+-- Makes Replay use the recorder-generated XOMA strategy format and installs the
+-- exact game2 Ready Up signal fix before replay can enter the pre-game gate.
 
 local environment = typeof(getgenv) == "function" and getgenv() or _G
 local session = environment.CTDIG_SESSION
@@ -15,7 +14,20 @@ then
     error("XOMA V20 Player patch: CTDIG session is unavailable")
 end
 
+-- Separate chunk: does not increase the already-large core chunk's top-level
+-- local/register count.
+local readySource = game:HttpGet(
+    "https://raw.githubusercontent.com/evilxoma/xomahub/refs/heads/main/patches/ready_v21.lua"
+)
+local readyChunk, readyError = loadstring(readySource)
+if not readyChunk then
+    error("XOMA Ready patch compile failed: " .. tostring(readyError))
+end
+readyChunk()
+
 if session.unifiedPlayerV20Installed == true then
+    session.replayBuild = "PASS11-UNIFIED-PLAYER-READY-V21"
+    session.autoBuild = "PASS11-UNIFIED-PLAYER-READY-V21"
     return session.XOMA
 end
 
@@ -56,9 +68,8 @@ local function executeStrategyFile()
         error("Replay ctdig.lua compile failed: " .. tostring(compileError), 2)
     end
 
-    -- The strategy itself calls ctdui.lua. PASS10 ctdui detects this live
-    -- session, resets only the strategy builder, and returns this same XOMA
-    -- object instead of cleaning/reloading the hub.
+    -- The strategy itself calls ctdui.lua. ctdui detects this live session,
+    -- resets only the strategy builder, and returns the same XOMA object.
     local runOk, runResult = xpcall(chunk, function(err)
         if debug and type(debug.traceback) == "function" then
             return debug.traceback(tostring(err), 2)
@@ -82,7 +93,7 @@ session.recorder.replayMacro = function(overrideMacro)
 end
 
 session.unifiedPlayerV20Installed = true
-session.replayBuild = "PASS10-UNIFIED-PLAYER-V20"
-session.autoBuild = "PASS10-UNIFIED-PLAYER-V20"
+session.replayBuild = "PASS11-UNIFIED-PLAYER-READY-V21"
+session.autoBuild = "PASS11-UNIFIED-PLAYER-READY-V21"
 
 return session.XOMA

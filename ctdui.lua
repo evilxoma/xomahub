@@ -11,6 +11,17 @@ if type(existingSession) == "table"
     and type(existingSession.XOMA) == "table"
     and type(existingSession.XOMA.Run) == "function"
 then
+    -- A recorder strategy always calls ctdui.lua before declaring its actions.
+    -- When the hub is already alive (Replay button), reuse it but give the
+    -- strategy a clean builder so actions from a previous run never duplicate.
+    existingSession.XOMA._macro = {
+        version = 1,
+        map = "Unknown",
+        deck = {},
+        config = {},
+        actions = {},
+    }
+    existingSession.XOMA._nextId = 0
     return existingSession.XOMA
 end
 
@@ -183,5 +194,14 @@ if not pregameChunk then
     error("XOMA pre-game patch compile failed: " .. tostring(pregameError))
 end
 XOMA = pregameChunk() or XOMA
+
+local playerSource = game:HttpGet(
+    "https://raw.githubusercontent.com/evilxoma/xomahub/refs/heads/main/patches/player_v20.lua"
+)
+local playerChunk, playerError = loadstring(playerSource)
+if not playerChunk then
+    error("XOMA Player patch compile failed: " .. tostring(playerError))
+end
+XOMA = playerChunk() or XOMA
 
 return XOMA

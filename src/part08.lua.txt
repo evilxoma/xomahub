@@ -299,6 +299,22 @@ local function queueTowerAction(tower, action)
         return false
     end
 
+    -- SELL is terminal for one recorder tower id. Roblox can replicate a late
+    -- Level/Targets/Cooldown change after the sell click, but that stale callback
+    -- must never become a macro action for the already-sold U#.
+    local state = ensureTowerState(tower)
+    if state.sold and action.type ~= "sell" then
+        debugLog(
+            "ignored post-sell recorder callback: "
+                .. tostring(action.type)
+                .. " | "
+                .. tostring(tower.Name)
+                .. " #"
+                .. tostring(ids[tower] or "?")
+        )
+        return false
+    end
+
     local id = ids[tower]
     if id then
         action.id = id
@@ -484,6 +500,9 @@ local function recordUpgrade(tower, hintedLevel)
     end
 
     local state = ensureTowerState(tower)
+    if state.sold then
+        return false
+    end
     if not state.ownedByRecorderPlayer and not isMine(tower) then
         return false
     end

@@ -1,8 +1,9 @@
 -- XOMA / CTDIG reliability patch
--- Build: PASS24-AUTORETRY-RECONNECT-V34
+-- Build: PASS24B-AUTORETRY-RECONNECT-RECORDER-V34
 -- Auto Retry is built in and cannot be disabled by SaveManager/autoload or by
 -- a strategy Config table. Network/disconnect error prompts trigger a rejoin
 -- loop; failed teleport attempts are retried until the connection recovers.
+-- Recorder output is also normalized to the V34 bootstrap after Stop & Save.
 
 local environment = typeof(getgenv) == "function" and getgenv() or _G
 local session = environment.CTDIG_SESSION
@@ -17,6 +18,9 @@ end
 local Players = game:GetService("Players")
 local TeleportService = game:GetService("TeleportService")
 local player = Players.LocalPlayer
+
+local MACRO_FILE = "ctdig.lua"
+local V34_BOOTSTRAP_URL = "https://raw.githubusercontent.com/evilxoma/xomahub/refs/heads/main/ctdui_v34.lua"
 
 session.forceAutoRetry = true
 
@@ -53,6 +57,57 @@ local function forceAutoRetry()
     return ok
 end
 
+-- Recorder's Stop & Save button was bound before this patch loads, so wrapping
+-- session.recorder.stopRecording afterwards would not reliably replace the
+-- already-bound callback. Instead, normalize the final ctdig.lua itself. This
+-- also upgrades an older recorder output the moment V34 sees it.
+local function upgradeSavedMacroBootstrap()
+    if typeof(isfile) ~= "function"
+        or typeof(readfile) ~= "function"
+        or typeof(writefile) ~= "function"
+        or not isfile(MACRO_FILE)
+    then
+        return false
+    end
+
+    local readOk, source = pcall(readfile, MACRO_FILE)
+    if not readOk or type(source) ~= "string" then
+        return false
+    end
+
+    if source:find("CTDIG / XOMA AUTOEXEC STRATEGY", 1, true) == nil then
+        return false
+    end
+
+    local updated = source:gsub(
+        "https://raw%.githubusercontent%.com/evilxoma/xomahub/refs/heads/main/ctdui[_%w%-]*%.lua",
+        V34_BOOTSTRAP_URL
+    )
+
+    if updated == source then
+        return source:find(V34_BOOTSTRAP_URL, 1, true) ~= nil
+    end
+
+    local writeOk, writeError = pcall(writefile, MACRO_FILE, updated)
+    if not writeOk then
+        warn("[XOMA V34] Could not upgrade saved macro bootstrap: " .. tostring(writeError))
+        return false
+    end
+
+    if typeof(readfile) == "function" then
+        local verifyOk, verify = pcall(readfile, MACRO_FILE)
+        if not verifyOk or verify ~= updated then
+            warn("[XOMA V34] Saved macro bootstrap verification failed")
+            return false
+        end
+    end
+
+    print("[XOMA V34] Saved macro bootstrap upgraded -> ctdui_v34.lua")
+    return true
+end
+
+session.upgradeSavedMacroBootstrapV34 = upgradeSavedMacroBootstrap
+
 if session.reliabilityConfigWrapped ~= true then
     session.XOMA.Config = function(self, config)
         return originalConfig(self, copyConfig(config))
@@ -61,14 +116,20 @@ if session.reliabilityConfigWrapped ~= true then
 end
 
 -- Force immediately, then keep enforcing it. This deliberately wins over an
--- autoload config that restores CTDIGAutoRetry=false a moment later.
+-- autoload config that restores CTDIGAutoRetry=false a moment later. The same
+-- lightweight loop also catches a freshly-written ctdig.lua after Stop & Save.
 forceAutoRetry()
-task.spawn(function()
-    while session.alive do
-        task.wait(1.0)
-        forceAutoRetry()
-    end
-end)
+upgradeSavedMacroBootstrap()
+if session.reliabilityMonitorV34Installed ~= true then
+    session.reliabilityMonitorV34Installed = true
+    task.spawn(function()
+        while session.alive do
+            task.wait(0.5)
+            forceAutoRetry()
+            upgradeSavedMacroBootstrap()
+        end
+    end)
+end
 
 session.reconnectV34 = session.reconnectV34 or {
     active = false,
@@ -223,7 +284,7 @@ if session.reconnectWatchersInstalled ~= true then
     end)
 end
 
-session.reliabilityBuild = "PASS24-AUTORETRY-RECONNECT-V34"
-print("[XOMA V34] Auto Retry forced ON | network reconnect installed")
+session.reliabilityBuild = "PASS24B-AUTORETRY-RECONNECT-RECORDER-V34"
+print("[XOMA V34] Auto Retry forced ON | network reconnect installed | recorder -> V34")
 
 return session.XOMA

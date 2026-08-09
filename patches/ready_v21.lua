@@ -1,211 +1,35 @@
--- XOMA pre-game Ready Up callback patch
--- Build: PASS13-READY-CALLBACK-V23
--- No VirtualInputManager / VirtualUser. We invoke the actual Lua callback
--- functions behind GUI connections and only accept replicated server state as
--- success. This is required because game2's saved WaitingRoom MouseButton1Down
--- handler is cosmetic only (button offset + click sound).
+-- XOMA pre-game Ready Up patch
+-- Build: PASS14-READY-INPUTOBJECT-V24
+-- game2(4) proves WaitingRoom.MouseButton1Down is cosmetic only. The real Ready
+-- path is driven by Roblox input processing, so direct RBXScriptSignal callbacks
+-- cannot produce the server vote. Use only VirtualInputManager mouse-button
+-- events at the button coordinates. We never send mouse-move or keyboard input,
+-- and never use VirtualUser, so the player's cursor/camera is not repositioned.
 
 local environment = typeof(getgenv) == "function" and getgenv() or _G
 local session = environment.CTDIG_SESSION
 
 if type(session) ~= "table" or type(session.auto) ~= "table" then
-    error("XOMA V23 ready patch: CTDIG session is unavailable")
+    error("XOMA V24 ready patch: CTDIG session is unavailable")
 end
 
 local Players = game:GetService("Players")
 local Workspace = game:GetService("Workspace")
+local UserInputService = game:GetService("UserInputService")
 
-local function executorFunction(name)
-    local value = rawget(environment, name) or rawget(_G, name)
-    return type(value) == "function" and value or nil
-end
-
-local function connectionFunction(connection)
-    if not connection then
-        return nil
-    end
-    local ok, fn = pcall(function()
-        return connection.Function
-    end)
-    if ok and (type(fn) == "function" or typeof(fn) == "function") then
-        return fn
+local function getVim()
+    local ok, service = pcall(game.GetService, game, "VirtualInputManager")
+    if ok and service then
+        return service
     end
     return nil
 end
 
-local function connectionEnabled(connection)
-    local ok, enabled = pcall(function()
-        return connection.Enabled
-    end)
-    return not ok or enabled ~= false
+local function buttonCenter(button)
+    return button.AbsolutePosition + (button.AbsoluteSize / 2)
 end
 
-local function functionLabel(fn)
-    local label = "callback"
-    pcall(function()
-        if debug and type(debug.info) == "function" then
-            local source = debug.info(fn, "s")
-            local line = debug.info(fn, "l")
-            if source then
-                label = tostring(source) .. ":" .. tostring(line or "?")
-            end
-        end
-    end)
-    return label
-end
-
-local function invokeFunction(fn, signalName, center)
-    if not fn then
-        return false, "no function"
-    end
-
-    -- Extra arguments are ignored by zero-argument Luau callbacks. For mouse
-    -- callbacks they match the normal x/y shape exposed by executor signals.
-    local ok, err
-    if signalName == "MouseButton1Down"
-        or signalName == "MouseButton1Up"
-        or signalName == "MouseButton1Click"
-    then
-        ok, err = pcall(fn, center.X, center.Y)
-    else
-        ok, err = pcall(fn)
-    end
-
-    if ok then
-        return true, functionLabel(fn)
-    end
-    return false, tostring(err)
-end
-
-local function restoreButtonVisual(button, position, dark, darkPosition)
-    pcall(function()
-        if button and button.Parent and position then
-            button.Position = position
-        end
-        if dark and dark.Parent and darkPosition then
-            dark.Position = darkPosition
-        end
-    end)
-end
-
-local function invokeSignalCallbacks(button, signalName, waitingDone)
-    local signal = button and button[signalName]
-    if not signal then
-        return false, signalName .. ":missing"
-    end
-
-    local getconnectionsFn = executorFunction("getconnections")
-    if not getconnectionsFn then
-        return false, signalName .. ":getconnections unavailable"
-    end
-
-    local okConnections, connections = pcall(getconnectionsFn, signal)
-    if not okConnections or type(connections) ~= "table" then
-        return false, signalName .. ":connections unavailable"
-    end
-
-    local center = button.AbsolutePosition + (button.AbsoluteSize / 2)
-    local oldPosition = button.Position
-    local dark = button:FindFirstChild("BackgroundDark")
-    local oldDarkPosition = dark and dark:IsA("GuiObject") and dark.Position or nil
-    local called = 0
-    local errors = 0
-    local lastDetail = "none"
-
-    for index, connection in ipairs(connections) do
-        if waitingDone and waitingDone.Value == true then
-            restoreButtonVisual(button, oldPosition, dark, oldDarkPosition)
-            return true, signalName .. ":confirmed-before-" .. tostring(index)
-        end
-
-        if connectionEnabled(connection) then
-            local fn = connectionFunction(connection)
-            if fn then
-                local callOk, detail = invokeFunction(fn, signalName, center)
-                lastDetail = tostring(index) .. "=" .. tostring(detail)
-                if callOk then
-                    called = called + 1
-                else
-                    errors = errors + 1
-                end
-
-                -- Give a callback that fired a remote one replication slice to
-                -- update WaitingRoomDone before trying another callback.
-                task.wait(0.06)
-                if waitingDone and waitingDone.Value == true then
-                    restoreButtonVisual(button, oldPosition, dark, oldDarkPosition)
-                    return true,
-                        signalName .. ":callback#" .. tostring(index)
-                            .. " confirmed | " .. tostring(detail)
-                end
-            end
-        end
-    end
-
-    restoreButtonVisual(button, oldPosition, dark, oldDarkPosition)
-    return false,
-        signalName .. ":functions=" .. tostring(called)
-            .. " errors=" .. tostring(errors)
-            .. " last=" .. tostring(lastDetail)
-end
-
--- Targeted fallback for executors where the real Ready callback is created
--- dynamically but its RBXScriptConnection wrapper hides Function. We inspect
--- only Lua closures that directly capture this exact WaitingRoom button and a
--- RemoteEvent/RemoteFunction; unrelated GC functions are never called.
-local function invokeCapturedReadyClosures(button, waitingDone)
-    local getgcFn = executorFunction("getgc")
-    local getupvaluesFn = executorFunction("getupvalues")
-        or (debug and type(debug.getupvalues) == "function" and debug.getupvalues)
-
-    if not getgcFn or not getupvaluesFn then
-        return false, "gc fallback unavailable"
-    end
-
-    local okGc, objects = pcall(getgcFn, true)
-    if not okGc or type(objects) ~= "table" then
-        return false, "getgc failed"
-    end
-
-    local candidates = 0
-    for _, object in ipairs(objects) do
-        if type(object) == "function" or typeof(object) == "function" then
-            local okUps, upvalues = pcall(getupvaluesFn, object)
-            if okUps and type(upvalues) == "table" then
-                local hasButton = false
-                local hasRemote = false
-                for _, value in pairs(upvalues) do
-                    if value == button then
-                        hasButton = true
-                    elseif typeof(value) == "Instance"
-                        and (value:IsA("RemoteEvent") or value:IsA("RemoteFunction"))
-                    then
-                        hasRemote = true
-                    end
-                end
-
-                if hasButton and hasRemote then
-                    candidates = candidates + 1
-                    local okCall = pcall(object)
-                    print(
-                        "[XOMA V23] Ready captured callback #"
-                            .. tostring(candidates)
-                            .. " | " .. functionLabel(object)
-                            .. " | call=" .. tostring(okCall)
-                    )
-                    task.wait(0.08)
-                    if waitingDone.Value == true then
-                        return true, "captured callback #" .. tostring(candidates)
-                    end
-                end
-            end
-        end
-    end
-
-    return false, "captured candidates=" .. tostring(candidates)
-end
-
-function session.auto.clickGuiButton(button, confirmationValue)
+local function sendButtonClick(button)
     if not button or not button:IsA("GuiButton") then
         return false, "button missing"
     end
@@ -213,27 +37,41 @@ function session.auto.clickGuiButton(button, confirmationValue)
         return false, "button has no screen size"
     end
 
-    -- For ordinary difficulty buttons this still invokes their exact connected
-    -- callback functions. For Ready we additionally pass WaitingRoomDone so we
-    -- can stop immediately on authoritative confirmation.
-    local signalOrder = {
-        "MouseButton1Click",
-        "Activated",
-        "MouseButton1Down",
-    }
-    local details = {}
-
-    for _, signalName in ipairs(signalOrder) do
-        local confirmed, detail = invokeSignalCallbacks(button, signalName, confirmationValue)
-        details[#details + 1] = detail
-        if confirmed then
-            session.auto.lastGuiClickMethod = detail
-            return true, detail
-        end
+    local vim = getVim()
+    if not vim then
+        return false, "VirtualInputManager unavailable"
     end
 
-    session.auto.lastGuiClickMethod = table.concat(details, " | ")
-    return false, session.auto.lastGuiClickMethod
+    -- Do not collide with a real click the player is currently holding.
+    local heldOk, held = pcall(UserInputService.IsMouseButtonPressed,
+        UserInputService, Enum.UserInputType.MouseButton1)
+    if heldOk and held == true then
+        return false, "player mouse1 is currently held"
+    end
+
+    local center = buttonCenter(button)
+    local ok, err = pcall(function()
+        -- Important: SendMouseMoveEvent is intentionally NEVER called. These x/y
+        -- values belong to the synthetic InputObject only; the visible cursor is
+        -- not moved to the button.
+        vim:SendMouseButtonEvent(center.X, center.Y, 0, true, game, 0)
+        task.wait(0.025)
+        vim:SendMouseButtonEvent(center.X, center.Y, 0, false, game, 0)
+    end)
+
+    if not ok then
+        return false, "VIM click failed: " .. tostring(err)
+    end
+
+    return true, string.format("VIM Mouse1 @ %.0f,%.0f", center.X, center.Y)
+end
+
+-- All pre-game buttons use one input path. This also fixes difficulty selection,
+-- whose saved MouseButton1Down handler in game2 is visual feedback only.
+function session.auto.clickGuiButton(button)
+    local ok, detail = sendButtonClick(button)
+    session.auto.lastGuiClickMethod = detail
+    return ok, detail
 end
 
 function session.auto.autoReadyVoting(timeout)
@@ -261,38 +99,30 @@ function session.auto.autoReadyVoting(timeout)
 
     local deadline = os.clock() + (tonumber(timeout) or 15)
     local attempts = 0
-    local gcTried = false
+    local nextAttempt = 0
 
     while session.alive and os.clock() < deadline do
         if waitingDone.Value == true then
-            print("[XOMA V23] Ready Up confirmed after " .. tostring(attempts) .. " attempts")
+            print("[XOMA V24] Ready Up confirmed after " .. tostring(attempts) .. " input attempts")
             return true
         end
 
-        if readyButton.Visible then
+        if readyButton.Visible and os.clock() >= nextAttempt then
             attempts = attempts + 1
-            local ok, detail = session.auto.clickGuiButton(readyButton, waitingDone)
+            local ok, detail = sendButtonClick(readyButton)
+            session.auto.lastGuiClickMethod = detail
             print(
-                "[XOMA V23] Ready Up attempt " .. tostring(attempts)
-                    .. " | ok=" .. tostring(ok)
+                "[XOMA V24] Ready Up input " .. tostring(attempts)
+                    .. " | sent=" .. tostring(ok)
                     .. " | " .. tostring(detail)
             )
-            if waitingDone.Value == true then
-                print("[XOMA V23] Ready Up confirmed via direct callback")
-                return true
-            end
 
-            if not gcTried and attempts >= 2 then
-                gcTried = true
-                local gcOk, gcDetail = invokeCapturedReadyClosures(readyButton, waitingDone)
-                print("[XOMA V23] Ready GC fallback | " .. tostring(gcDetail))
-                if gcOk and waitingDone.Value == true then
-                    return true
-                end
-            end
+            -- Give the server plenty of time to replicate WaitingRoomDone. This
+            -- prevents the 30+ callback spam seen in V23.
+            nextAttempt = os.clock() + 0.85
         end
 
-        task.wait(0.25)
+        task.wait(0.06)
     end
 
     return waitingDone.Value == true,
@@ -300,5 +130,5 @@ function session.auto.autoReadyVoting(timeout)
             .. " | last=" .. tostring(session.auto.lastGuiClickMethod)
 end
 
-session.readyBuild = "PASS13-READY-CALLBACK-V23"
+session.readyBuild = "PASS14-READY-INPUTOBJECT-V24"
 return session.XOMA

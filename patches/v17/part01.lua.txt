@@ -1,0 +1,259 @@
+-- XOMA AutoExec patch
+-- Build: PASS7-AUTOEXEC-V17
+-- Loaded after the V16 core so old Recorder/XOMA syntax stays compatible.
+
+local environment = typeof(getgenv) == "function" and getgenv() or _G
+local session = environment.CTDIG_SESSION
+
+if type(session) ~= "table"
+    or type(session.auto) ~= "table"
+    or type(session.XOMA) ~= "table"
+then
+    error("XOMA V17 patch: CTDIG session is unavailable")
+end
+
+local Players = game:GetService("Players")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local Workspace = game:GetService("Workspace")
+local StarterGui = game:GetService("StarterGui")
+
+local player = Players.LocalPlayer
+local remotes = ReplicatedStorage:WaitForChild("Remotes", 20)
+
+local function status(text)
+    print("[XOMA AutoExec] " .. tostring(text))
+end
+
+local function notify(title, text, duration)
+    pcall(function()
+        StarterGui:SetCore("SendNotification", {
+            Title = tostring(title),
+            Text = tostring(text or ""),
+            Duration = duration or 4,
+        })
+    end)
+end
+
+local function tracebackError(err)
+    if debug and type(debug.traceback) == "function" then
+        return debug.traceback(tostring(err), 2)
+    end
+    return tostring(err)
+end
+
+local function getMapName()
+    local map = Workspace:FindFirstChild("Map")
+    local trueName = map and map:FindFirstChild("TrueName")
+    return trueName and tostring(trueName.Value)
+        or (map and map.Name or "Unknown")
+end
+
+local function getCTDModule()
+    local modules = ReplicatedStorage:FindFirstChild("Modules")
+    local moduleScript = modules and modules:FindFirstChild("CTDModule")
+    if not moduleScript then
+        return nil
+    end
+
+    local ok, module = pcall(require, moduleScript)
+    return ok and module or nil
+end
+
+session.combatBuild = "PASS7-AUTOEXEC-V17"
+session.replayBuild = "PASS7-AUTOEXEC-V17"
+session.autoBuild = "PASS7-AUTOEXEC-V17"
+
+function session.auto.normalizeDeck(deck)
+    local normalized = {}
+
+    for _, unitName in ipairs(type(deck) == "table" and deck or {}) do
+        unitName = tostring(unitName or "")
+        if unitName ~= "" and unitName ~= "None" then
+            normalized[#normalized + 1] = unitName
+        end
+    end
+
+    return normalized
+end
+
+function session.auto.deckExactMatches(a, b)
+    a = session.auto.normalizeDeck(a)
+    b = session.auto.normalizeDeck(b)
+
+    if #a ~= #b then
+        return false
+    end
+
+    for i = 1, #a do
+        if a[i] ~= b[i] then
+            return false
+        end
+    end
+
+    return true
+end
+
+function session.auto.loadoutDataDeck(data)
+    local towers = type(data) == "table" and data.Towers or nil
+    if type(towers) ~= "table" then
+        return {}
+    end
+
+    local slots = {}
+    for key, value in pairs(towers) do
+        local index = tonumber(tostring(key):match("^Tower(%d+)$"))
+        if index then
+            slots[#slots + 1] = {
+                index = index,
+                value = tostring(value),
+            }
+        end
+    end
+
+    table.sort(slots, function(a, b)
+        return a.index < b.index
+    end)
+
+    local deck = {}
+    for _, slot in ipairs(slots) do
+        deck[#deck + 1] = slot.value
+    end
+
+    return session.auto.normalizeDeck(deck)
+end
+
+function session.auto.verifyCurrentMacroDeck(macro)
+    local required = session.auto.requiredUnitsFromMacro(macro)
+    local wanted = session.auto.normalizeDeck(
+        type(macro) == "table" and macro.deck or nil
+    )
+    local current = session.auto.normalizeDeck(session.getDeckSnapshot())
+
+    if #wanted > 0 then
+        if session.auto.deckExactMatches(current, wanted) then
+            return true
+        end
+
+        return false, "expected: "
+            .. session.compactDeckText(wanted)
+            .. " | current: "
+            .. session.compactDeckText(current)
+    end
+
+    if #required == 0 then
+        return true
+    end
+
+    if #current == 0 then
+        return false, "PlayerData.Loadout is empty/unavailable"
+    end
+
+    local ok, missing = session.auto.deckContainsRequired(current, required)
+    if ok then
+        return true
+    end
+
+    return false, "missing "
+        .. tostring(missing)
+        .. " | current: "
+        .. session.compactDeckText(current)
+end
+
+function session.auto.ensureMacroDeckInLobby(macro)
+    local required = session.auto.requiredUnitsFromMacro(macro)
+    local wantedDeck = session.auto.normalizeDeck(
+        type(macro) == "table" and macro.deck or nil
+    )
+
+    if #required == 0 and #wantedDeck == 0 then
+        return true
+    end
+
+    local data = player:WaitForChild("PlayerData", 20)
+    local loadout = data and data:WaitForChild("Loadout", 20)
+    if not loadout then
+        return false, "PlayerData.Loadout was not found"
+    end
+
+    local current = session.auto.normalizeDeck(session.getDeckSnapshot())
+    if #wantedDeck > 0 then
+        if session.auto.deckExactMatches(current, wantedDeck) then
+            return true
+        end
+    else
+        local contains = session.auto.deckContainsRequired(current, required)
+        if contains then
+            return true
+        end
+    end
+
+    local module = getCTDModule()
+    if not module or type(module.PlayerLoadouts) ~= "function" then
+        return false, "CTDModule.PlayerLoadouts is unavailable"
+    end
+
+    if type(module.waitforload) == "function" then
+        pcall(module.waitforload)
+    end
+
+    local ok, loadouts = pcall(module.PlayerLoadouts, player, "GetLoadouts")
+    if not ok or type(loadouts) ~= "table" then
+        return false, "GetLoadouts failed: " .. tostring(loadouts)
+    end
+
+    local selectedCode
+    local selectedDeck
+
+    for code, loadoutData in pairs(loadouts) do
+        local deck = session.auto.loadoutDataDeck(loadoutData)
+        local valid = false
+
+        if #wantedDeck > 0 then
+            valid = session.auto.deckExactMatches(deck, wantedDeck)
+        else
+            valid = session.auto.deckContainsRequired(deck, required) == true
+        end
+
+        if valid then
+            selectedCode = code
+            selectedDeck = deck
+            break
+        end
+    end
+
+    if selectedCode == nil then
+        if #wantedDeck > 0 then
+            return false, "no saved loadout exactly matches: "
+                .. session.compactDeckText(wantedDeck)
+        end
+
+        return false, "no saved loadout contains: "
+            .. table.concat(required, ", ")
+    end
+
+    status(
+        "equipping "
+            .. tostring(selectedCode)
+            .. " | "
+            .. session.compactDeckText(selectedDeck)
+    )
+
+    local equipOk, equipResult = pcall(
+        module.PlayerLoadouts,
+        player,
+        "EquipLoadout",
+        {
+            loadoutcode = tostring(selectedCode),
+        }
+    )
+
+    if not equipOk then
+        return false, "EquipLoadout failed: " .. tostring(equipResult)
+    end
+
+    local started = os.clock()
+    while session.alive and os.clock() - started < 10 do
+        local deck = session.auto.normalizeDeck(session.getDeckSnapshot())
+        local ready
+
+        if #wantedDeck > 0 then

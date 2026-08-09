@@ -24,8 +24,8 @@ local MACRO_FILE = "ctdig.lua"
 
 local function isXomaStrategySource(source)
     return type(source) == "string"
+        and source:find("CTDIG / XOMA AUTOEXEC STRATEGY", 1, true) ~= nil
         and source:find("XOMA:Run", 1, true) ~= nil
-        and source:find("XOMA:Place", 1, true) ~= nil
 end
 
 local function executeStrategyFile()

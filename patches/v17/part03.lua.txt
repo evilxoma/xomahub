@@ -1,0 +1,257 @@
+                                    currentMap and tostring(currentMap.Value) or ""
+                                local replicatedEntry =
+                                    entry and tostring(entry.Value) or ""
+                                local replicatedOpen =
+                                    roomOpen and roomOpen.Value == true or false
+
+                                if replicatedOwner == player.Name
+                                    and replicatedMap == macro.map
+                                    and replicatedEntry == "FriendsOnly"
+                                    and replicatedOpen
+                                then
+                                    confirmed = true
+                                    break
+                                end
+
+                                task.wait(0.08)
+                            end
+
+                            if confirmed then
+                                status("room replication confirmed")
+                            else
+                                -- OpenRoom returned true; the native lobby treats
+                                -- that as success, so do not reject a slow replica.
+                                status("OpenRoom accepted | waiting teleport")
+                            end
+
+                            notify(
+                                "AutoExecute",
+                                "Room ready: "
+                                    .. macro.map
+                                    .. " | FriendsOnly",
+                                3
+                            )
+
+                            for teleportAttempt = 1, 3 do
+                                if not session.alive then
+                                    return false, "stopped"
+                                end
+
+                                status(
+                                    string.format(
+                                        "teleport %d/3 | %s",
+                                        teleportAttempt,
+                                        macro.map
+                                    )
+                                )
+
+                                local tpOk, tpResult = pcall(function()
+                                    return elevators:InvokeServer(
+                                        room,
+                                        "Teleport"
+                                    )
+                                end)
+
+                                if tpOk and tpResult ~= false then
+                                    notify(
+                                        "AutoExecute",
+                                        "Teleport requested: " .. macro.map,
+                                        4
+                                    )
+                                    return true
+                                end
+
+                                lastError = tpOk
+                                    and "Teleport rejected"
+                                    or (
+                                        "Teleport failed: "
+                                        .. tostring(tpResult)
+                                    )
+
+                                task.wait(0.6)
+                            end
+                        else
+                            lastError = callOk
+                                and (
+                                    "OpenRoom rejected elevator "
+                                    .. tostring(index)
+                                )
+                                or (
+                                    "OpenRoom error: "
+                                    .. tostring(opened)
+                                )
+                        end
+                    else
+                        lastError = moveError or lastError
+                    end
+                end
+            end
+
+            status("waiting free elevator | " .. tostring(lastError))
+            task.wait(0.75)
+        end
+    end
+
+    return false, lastError
+end
+
+function session.auto.waitForMatchReady(macro, timeout)
+    local deadline = os.clock() + (tonumber(timeout) or 35)
+    local lastError = "match context not ready"
+
+    while session.alive and os.clock() < deadline do
+        local towers = Workspace:FindFirstChild("Towers")
+        local map = Workspace:FindFirstChild("Map")
+        local config = map and map:FindFirstChild("Configuration")
+        local data = player:FindFirstChild("PlayerData")
+        local loadout = data and data:FindFirstChild("Loadout")
+
+        if towers and map and config and data and loadout then
+            local currentMap = getMapName()
+
+            if currentMap ~= "Unknown" then
+                if macro.map
+                    and macro.map ~= ""
+                    and macro.map ~= "Unknown"
+                    and currentMap ~= macro.map
+                then
+                    return false, "wrong map | macro: "
+                        .. tostring(macro.map)
+                        .. " | current: "
+                        .. tostring(currentMap)
+                end
+
+                local deckOk, deckError =
+                    session.auto.verifyCurrentMacroDeck(macro)
+
+                if deckOk then
+                    if not session.sourceBound then
+                        session.sourceBound, session.sourceError =
+                            session.recorder.bindGameSources()
+                    end
+
+                    if session.sourceBound then
+                        return true
+                    end
+
+                    lastError =
+                        session.sourceError or "match sources unavailable"
+                else
+                    lastError =
+                        "waiting deck replication | " .. tostring(deckError)
+                end
+            else
+                lastError = "waiting map TrueName"
+            end
+        else
+            lastError = "waiting Towers/Map/PlayerData"
+        end
+
+        status(lastError)
+        task.wait(0.1)
+    end
+
+    return false, lastError
+end
+
+function session.auto.runMacroInMatch(macro)
+    local ready, readyError =
+        session.auto.waitForMatchReady(macro, 35)
+
+    if not ready then
+        return false, readyError
+    end
+
+    status("match ready | starting replay")
+    task.wait(0.15)
+
+    local ok, replayError = xpcall(function()
+        session.recorder.replayMacro(macro)
+    end, tracebackError)
+
+    if not ok then
+        return false, tostring(replayError)
+    end
+
+    return true
+end
+
+function session.auto.runMacroFromCurrentPlace(macro)
+    local deadline = os.clock() + 45
+    local lastError = "lobby/match not detected"
+
+    while session.alive and os.clock() < deadline do
+        local lobbyContext =
+            Workspace:FindFirstChild("Elevators") ~= nil
+            and Workspace:FindFirstChild("Towers") == nil
+
+        local map = Workspace:FindFirstChild("Map")
+        local matchContext =
+            Workspace:FindFirstChild("Towers") ~= nil
+            and map ~= nil
+
+        if lobbyContext then
+            status("lobby | checking exact deck")
+
+            local deckOk, deckError =
+                session.auto.ensureMacroDeckInLobby(macro)
+
+            if not deckOk then
+                return false, "deck: " .. tostring(deckError)
+            end
+
+            status("lobby | deck OK | finding elevator")
+
+            local roomOk, roomError =
+                session.auto.openMacroMapFromLobby(macro)
+
+            if not roomOk then
+                return false, "lobby: " .. tostring(roomError)
+            end
+
+            -- The strategy file itself lives in autoexec. After Roblox
+            -- teleports, the executor runs it again; XOMA:Run() sees the
+            -- match place and resumes the same strategy automatically.
+            return true, "teleport requested"
+        end
+
+        if matchContext then
+            return session.auto.runMacroInMatch(macro)
+        end
+
+        status("waiting for lobby/match")
+        task.wait(0.2)
+    end
+
+    return false, lastError
+end
+
+function session.XOMA:Run()
+    local macro = self._macro
+
+    if type(macro) ~= "table"
+        or type(macro.actions) ~= "table"
+    then
+        error("XOMA:Run() has no valid strategy", 2)
+    end
+
+    if #macro.actions == 0 then
+        error("XOMA:Run() strategy has no actions", 2)
+    end
+
+    status(
+        tostring(macro.map or "Unknown")
+            .. " | "
+            .. tostring(#macro.actions)
+            .. " actions"
+    )
+
+    local ok, result = session.auto.runMacroFromCurrentPlace(macro)
+    if not ok then
+        error("XOMA AutoExec error: " .. tostring(result), 2)
+    end
+
+    return true
+end
+
+return session.XOMA

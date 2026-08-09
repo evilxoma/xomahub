@@ -1,0 +1,491 @@
+        #enemies,
+        #towers,
+        uncovered > 0 and (" | " .. uncovered .. " uncovered") or ""
+    ))
+    setCombatDiagPredict(string.format(
+        "%s | ready=%d direct=%d towers=%d shots=%d events=%d pathFallback=%d statMiss=%d waiting=%d",
+        session.combatBuild,
+        #enemies,
+        #discoveredEnemies,
+        #towers,
+        shots,
+        events,
+        incompletePaths,
+        towerStatMisses,
+        healthMisses
+    ))
+end
+
+session.visuals = {
+    destroyRangePreview = destroyRangePreview,
+    refreshRangePreview = refreshRangePreview,
+    formatCompactNumber = formatCompactNumber,
+    readNumberValue = readNumberValue,
+    looksLikeRuntimeEnemy = looksLikeRuntimeEnemy,
+    towerDPS = towerDPS,
+    towerCombatStats = towerCombatStats,
+    sampleTowerLiveDPS = sampleTowerLiveDPS,
+    ensureDpsGui = ensureDpsGui,
+    clearDpsGuis = clearDpsGuis,
+    clearKillHighlights = clearKillHighlights,
+    updateKillPreview = updateKillPreview,
+    setKillInfo = setKillInfo,
+}
+end
+
+do
+local function describeSurface(surface, worldPosition)
+    if typeof(surface) ~= "Instance" then
+        return nil
+    end
+
+    if surface == Workspace.Terrain then
+        return {
+            root = "Terrain",
+            name = surface.Name,
+            class = surface.ClassName,
+            worldPosition = vec(worldPosition),
+        }
+    end
+
+    local map = Workspace:FindFirstChild("Map")
+    local root = Workspace
+    local rootName = "Workspace"
+
+    if map and (surface == map or surface:IsDescendantOf(map)) then
+        root = map
+        rootName = "Map"
+    elseif not surface:IsDescendantOf(Workspace) then
+        return nil
+    end
+
+    local description = {
+        root = rootName,
+        path = surface == root and {} or pathUnder(root, surface),
+        name = surface.Name,
+        class = surface.ClassName,
+        worldPosition = vec(worldPosition),
+    }
+
+    if surface:IsA("BasePart") then
+        description.localPosition = vec(surface.CFrame:PointToObjectSpace(worldPosition))
+    end
+
+    return description
+end
+
+local function resolveSurface(description, fallbackPosition)
+    if type(description) ~= "table" then
+        return nil, fallbackPosition
+    end
+
+    if description.root == "Terrain" then
+        return Workspace.Terrain, fallbackPosition
+    end
+
+    local root
+    if description.root == "Map" then
+        root = Workspace:FindFirstChild("Map")
+    elseif description.root == "Workspace" then
+        root = Workspace
+    end
+
+    if not root then
+        return nil, fallbackPosition
+    end
+
+    local surface = resolvePath(root, description.path)
+    if surface and description.class and surface.ClassName ~= description.class then
+        surface = nil
+    end
+
+    if not surface then
+        local referencePosition = toVector3(description.worldPosition or vec(fallbackPosition))
+        local bestDistance = math.huge
+
+        for _, candidate in ipairs(root:GetDescendants()) do
+            if candidate:IsA("BasePart")
+                and (not description.name or candidate.Name == description.name)
+                and (not description.class or candidate.ClassName == description.class) then
+                local candidatePosition = candidate.Position
+                if description.localPosition then
+                    candidatePosition = candidate.CFrame:PointToWorldSpace(toVector3(description.localPosition))
+                end
+
+                local distance = (candidatePosition - referencePosition).Magnitude
+                if distance < bestDistance then
+                    surface = candidate
+                    bestDistance = distance
+                end
+            end
+        end
+    end
+
+    if not surface then
+        return nil, fallbackPosition
+    end
+
+    if surface:IsA("BasePart") and description.localPosition then
+        return surface, surface.CFrame:PointToWorldSpace(toVector3(description.localPosition))
+    end
+
+    return surface, fallbackPosition
+end
+
+local function canonicalUnitObject(unitName)
+    local units = ReplicatedStorage:FindFirstChild("Units")
+    local unitFolder = units and units:FindFirstChild(unitName)
+    local levels = unitFolder and unitFolder:FindFirstChild("Levels")
+    local levelZero = levels and levels:FindFirstChild("0")
+    local objectFolder = levelZero and levelZero:FindFirstChild("Object")
+    if not objectFolder then
+        return nil
+    end
+
+    return objectFolder:FindFirstChild(unitName)
+        or objectFolder:FindFirstChildWhichIsA("Model")
+end
+
+local function resolveUnit(unitName, source)
+    local cached = resolvedUnits[unitName]
+    if cached and cached.Parent then
+        return cached
+    end
+
+    local saved = resolveSource(source)
+    if saved and saved.Name == unitName then
+        resolvedUnits[unitName] = saved
+        return saved
+    end
+
+    local canonical = canonicalUnitObject(unitName)
+    if canonical then
+        resolvedUnits[unitName] = canonical
+        return canonical
+    end
+
+    local config = findPlacementConfiguration()
+    local chosen = config and config:FindFirstChild("UnitChoosed")
+    if chosen and typeof(chosen.Value) == "Instance" and chosen.Value.Name == unitName then
+        resolvedUnits[unitName] = chosen.Value
+        return chosen.Value
+    end
+
+    for _, object in ipairs(playerGui:GetDescendants()) do
+        if object:IsA("ObjectValue") and object.Name == "Unit"
+            and typeof(object.Value) == "Instance" and object.Value.Name == unitName then
+            resolvedUnits[unitName] = object.Value
+            return object.Value
+        end
+    end
+
+    return nil
+end
+
+local function rawPlacementPosition(tower)
+    local root = getRoot(tower)
+    if not root then
+        return nil
+    end
+
+    if tower:IsA("Model") then
+        return root.Position - Vector3.new(
+            root.Size.X / 2 - 0.5,
+            root.Size.Y / 1.6 + 1,
+            root.Size.Z / 2
+        )
+    end
+
+    return root.Position - Vector3.new(
+        root.Size.X / 2 - 0.5,
+        root.Size.Y / 2 + 1,
+        root.Size.Z / 2
+    )
+end
+
+local function findPlacementSurface(tower, position)
+    local placedOnPart = tower and tower:FindFirstChild("PlacedOnPart")
+    if placedOnPart and placedOnPart:IsA("ObjectValue") and placedOnPart.Value then
+        return placedOnPart.Value
+    end
+
+    local params = RaycastParams.new()
+    params.FilterType = Enum.RaycastFilterType.Exclude
+    local ignore = {}
+    local towers = getTowers()
+    if towers then
+        ignore[#ignore + 1] = towers
+    end
+    if player.Character then
+        ignore[#ignore + 1] = player.Character
+    end
+    params.FilterDescendantsInstances = ignore
+
+    local result = Workspace:Raycast(position + Vector3.new(0, 12, 0), Vector3.new(0, -30, 0), params)
+    return result and result.Instance or nil
+end
+
+local function recorderLine(action)
+    local wave = tonumber(action.wave) or 0
+
+    if action.type == "place" then
+        return string.format("[WAVE %d] PLACE %s #%d", wave, tostring(action.unit), action.id)
+    elseif action.type == "upgrade" then
+        return string.format("[WAVE %d] UPGRADE %s #%d -> LVL %d", wave, tostring(action.unit), action.id, action.level)
+    elseif action.type == "target" then
+        return string.format("[WAVE %d] TARGET #%d -> %s", wave, action.id, tostring(action.mode))
+    elseif action.type == "ability" then
+        return string.format("[WAVE %d] ABILITY #%d -> %s", wave, action.id, tostring(action.ability))
+    elseif action.type == "sell" then
+        return string.format("[WAVE %d] SELL #%d", wave, action.id)
+    elseif action.type == "skip" then
+        return string.format("[WAVE %d] SKIP", wave)
+    end
+
+    return string.format("[WAVE %d] %s", wave, string.upper(tostring(action.type)))
+end
+
+local function addAction(action)
+    if not recording or replaying or type(action) ~= "table" then
+        return false
+    end
+
+    action.wave = tonumber(action.wave) or getWave()
+    actions[#actions + 1] = action
+    refreshRecorderStatus()
+    logRecorderAction(recorderLine(action))
+
+    if action.type == "place" then
+        notify("Unit placed", string.format("%s #%d", action.unit, action.id), 3)
+    elseif action.type == "upgrade" then
+        notify("Unit upgraded", string.format("%s #%d -> LVL %d", action.unit, action.id, action.level), 3)
+    elseif action.type == "target" then
+        notify("Target changed", string.format("#%d -> %s", action.id, action.mode), 2)
+    elseif action.type == "ability" then
+        notify("Ability used", string.format("#%d -> %s", action.id, action.ability), 2)
+    elseif action.type == "sell" then
+        notify("Unit sold", string.format("#%d", action.id), 2)
+    elseif action.type == "skip" then
+        notify("Wave skipped", "Wave " .. tostring(action.wave), 2)
+    end
+
+    return true
+end
+
+local function ensureTowerState(tower)
+    local state = towerState[tower]
+    if not state then
+        local level = getLevel(tower)
+        state = {
+            recordedLevel = level,
+            target = getTarget(tower),
+            cooldowns = {},
+            boundCooldowns = {},
+            lastAbilityRecordedAt = {},
+            sold = false,
+            ownedByRecorderPlayer = isMine(tower),
+        }
+        towerState[tower] = state
+    elseif isMine(tower) then
+        state.ownedByRecorderPlayer = true
+    end
+    return state
+end
+
+local function queueTowerAction(tower, action)
+    if not recording or replaying or not tower or baselineTowers[tower] or type(action) ~= "table" then
+        return false
+    end
+
+    local id = ids[tower]
+    if id then
+        action.id = id
+        return addAction(action)
+    end
+
+    action.wave = tonumber(action.wave) or getWave()
+    action.queuedAt = os.clock()
+    local pending = session.pendingTowerActions[tower]
+    if not pending then
+        pending = {}
+        session.pendingTowerActions[tower] = pending
+    end
+
+    local previous = pending[#pending]
+    if previous and previous.type == action.type then
+        if action.type == "target" and previous.mode == action.mode then
+            return true
+        elseif action.type == "sell" then
+            return true
+        elseif action.type == "upgrade" and tonumber(previous.level) == tonumber(action.level) then
+            return true
+        elseif action.type == "ability" and previous.ability == action.ability then
+            return true
+        end
+    end
+
+    pending[#pending + 1] = action
+    debugLog("queued recorder action until Place confirms: " .. tostring(action.type) .. " | " .. tostring(tower.Name))
+    return true
+end
+
+local function flushTowerActions(tower)
+    local id = ids[tower]
+    local pending = session.pendingTowerActions[tower]
+    if not id or not pending then
+        return 0
+    end
+
+    session.pendingTowerActions[tower] = nil
+    local flushed = 0
+    for _, action in ipairs(pending) do
+        action.id = id
+        action.queuedAt = nil
+        if addAction(action) then
+            flushed = flushed + 1
+        end
+    end
+    return flushed
+end
+
+local function recordPlace(tower, placement)
+    if not recording or replaying or baselineTowers[tower]
+        or ids[tower] or not isMine(tower) then
+        return false
+    end
+
+    if placement and (placement.claimed or placement.unitName ~= tower.Name) then
+        placement = nil
+    end
+
+    local position = rawPlacementPosition(tower)
+    local root = getRoot(tower)
+    if not position and root then
+        position = root.Position
+    end
+    if not position and placement and type(placement.position) == "table" then
+        position = toVector3(placement.position)
+    end
+    if not position then
+        debugLog("confirmed placement has no usable position for " .. tower:GetFullName())
+        return false
+    end
+
+    local surface = findPlacementSurface(tower, position)
+    local surfaceDescription = surface and describeSurface(surface, position) or nil
+    if not surfaceDescription and placement then
+        surfaceDescription = placement.surface
+    end
+    if not surfaceDescription then
+        debugLog("confirmed placement has no serializable surface for " .. tower:GetFullName())
+        return false
+    end
+
+    local rotation
+    local source
+    local wave
+    if placement then
+        rotation = placement.rotation
+        source = placement.source
+        wave = placement.wave
+        placement.claimed = true
+    else
+        rotation = root and vec(root.Orientation) or vec(Vector3.zero)
+        local canonical = canonicalUnitObject(tower.Name)
+        source = canonical and sourceFor(canonical) or nil
+        wave = getWave()
+    end
+
+    if not source then
+        local canonical = canonicalUnitObject(tower.Name)
+        source = canonical and sourceFor(canonical) or nil
+    end
+
+    local id = nextId
+    nextId = nextId + 1
+    ids[tower] = id
+
+    local state = ensureTowerState(tower)
+    local initialLevelMarker = tower:FindFirstChild("TowerInitialLevelSet")
+    local initialLevel = initialLevelMarker and tonumber(initialLevelMarker.Value) or 0
+    local canonical = canonicalUnitObject(tower.Name)
+    local initialTarget = canonical and getTarget(canonical) or nil
+    if initialTarget == nil then
+        initialTarget = state.target or getTarget(tower)
+    end
+
+    state.recordedLevel = initialLevel
+    state.target = getTarget(tower)
+    state.sold = false
+
+    local placed = addAction({
+        type = "place",
+        unit = tower.Name,
+        id = id,
+        source = source,
+        position = vec(position),
+        rotation = rotation or vec(Vector3.zero),
+        surface = surfaceDescription,
+        initialLevel = initialLevel,
+        initialTarget = initialTarget,
+        wave = wave or getWave(),
+    })
+
+    if not placed then
+        ids[tower] = nil
+        nextId = math.max(1, nextId - 1)
+        return false
+    end
+
+    flushTowerActions(tower)
+
+    local liveLevel = getLevel(tower)
+    if liveLevel > (tonumber(state.recordedLevel) or 0) then
+        state.recordedLevel = liveLevel
+        local last = actions[#actions]
+        if not (last and last.type == "upgrade" and last.id == id and tonumber(last.level) == liveLevel) then
+            addAction({
+                type = "upgrade",
+                unit = tower.Name,
+                id = id,
+                level = liveLevel,
+            })
+        end
+    end
+
+    local liveTarget = getTarget(tower)
+    if liveTarget and initialTarget and liveTarget ~= initialTarget then
+        local last = actions[#actions]
+        if not (last and last.type == "target" and last.id == id and last.mode == liveTarget) then
+            addAction({
+                type = "target",
+                id = id,
+                mode = liveTarget,
+            })
+        end
+        state.target = liveTarget
+    end
+
+    return true
+end
+
+local function recordUpgrade(tower, hintedLevel)
+    if not recording or replaying or not tower or baselineTowers[tower] then
+        return false
+    end
+
+    local state = ensureTowerState(tower)
+    if not state.ownedByRecorderPlayer and not isMine(tower) then
+        return false
+    end
+
+    local newLevel = tonumber(hintedLevel) or getLevel(tower)
+    if newLevel <= (tonumber(state.recordedLevel) or 0) then
+        return false
+    end
+
+    state.recordedLevel = newLevel
+    return queueTowerAction(tower, {
+        type = "upgrade",
+        unit = tower.Name,
+        level = newLevel,

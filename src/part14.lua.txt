@@ -1,0 +1,500 @@
+    notify("Replay started", tostring(#macro.actions) .. " actions", 3)
+
+    local replayError
+    local processed = 0
+
+    local function stopWithError(message, duration)
+        replaying = false
+        if replayStopRequested or not session.alive then
+            return
+        end
+
+        replayError = tostring(message)
+        notify("Replay error", replayError, duration or 5)
+    end
+
+    local function restore(id)
+        local state = runtime[id]
+
+        if state and state.sold then
+            return nil, "unit #" .. id .. " was already sold"
+        end
+
+        local place = placeById[id]
+        if not place then
+            return nil, "place action for #" .. id .. " is missing"
+        end
+
+        state = state or {
+            level = tonumber(place.initialLevel) or 0,
+            target = place.initialTarget,
+            sold = false,
+        }
+        runtime[id] = state
+
+        while replaying and session.alive do
+            -- Existing live replacement is always preferred.
+            if not state.tower or not state.tower.Parent then
+                state.tower = nil
+
+                while replaying and session.alive and not state.tower do
+                    local tower, placeError = performPlace(place)
+                    if tower then
+                        state.tower = tower
+                        state.placeRetries = 0
+                        break
+                    end
+
+                    if isFatalReplayError(placeError) then
+                        return nil, placeError
+                    end
+
+                    state.placeRetries = (state.placeRetries or 0) + 1
+                    setReplayStatus(string.format(
+                        "Restore #%s | waiting place %d | %s",
+                        tostring(id),
+                        state.placeRetries,
+                        tostring(placeError)
+                    ))
+                    task.wait(replayBackoff(state.placeRetries))
+                end
+            end
+
+            if not replaying or not session.alive or not state.tower then
+                return nil, "stopped"
+            end
+
+            -- Rebuild the replacement to the last successfully reached level.
+            local targetLevel = tonumber(state.level) or getLevel(state.tower)
+            local restoreRestart = false
+
+            while replaying
+                and session.alive
+                and state.tower
+                and state.tower.Parent
+                and getLevel(state.tower) < targetLevel
+            do
+                local ok, upgradeError = performUpgrade(
+                    state.tower,
+                    getLevel(state.tower) + 1
+                )
+
+                if ok then
+                    state.upgradeRetries = 0
+                elseif upgradeError == "tower missing" or not state.tower.Parent then
+                    state.tower = nil
+                    restoreRestart = true
+                    break
+                else
+                    state.upgradeRetries = (state.upgradeRetries or 0) + 1
+                    setReplayStatus(string.format(
+                        "Restore #%s | upgrade %d | %s",
+                        tostring(id),
+                        state.upgradeRetries,
+                        tostring(upgradeError)
+                    ))
+                    task.wait(replayBackoff(state.upgradeRetries))
+                end
+            end
+
+            if restoreRestart then
+                -- Tower died again while rebuilding; place another one.
+            elseif state.target and state.tower and state.tower.Parent then
+                local targetOk, targetError = performTarget(state.tower, state.target)
+                if targetOk then
+                    return state.tower
+                end
+                if targetError == "tower missing" or not state.tower.Parent then
+                    state.tower = nil
+                elseif isFatalReplayError(targetError) then
+                    return nil, targetError
+                else
+                    task.wait(0.08)
+                end
+            elseif state.tower and state.tower.Parent then
+                return state.tower
+            end
+        end
+
+        return nil, "stopped"
+    end
+
+    for index, action in ipairs(macro.actions) do
+        if not replaying or not session.alive then
+            break
+        end
+
+        if not session.auto.waitForReplayWave(action, index, #macro.actions) then
+            break
+        end
+
+        setReplayStatus(string.format("%d/%d | W%d | %s", index, #macro.actions, tonumber(action.wave) or 0, tostring(action.type)))
+
+        if action.type == "place" then
+            local state = runtime[action.id] or {
+                level = tonumber(action.initialLevel) or 0,
+                target = action.initialTarget,
+                sold = false,
+            }
+            runtime[action.id] = state
+
+            while replaying and session.alive do
+                local tower, placeError = performPlace(action)
+                if tower then
+                    state.tower = tower
+                    state.level = getLevel(tower)
+                    if state.target and getTarget(tower) ~= state.target then
+                        performTarget(tower, state.target)
+                    end
+                    notify("Replay", "Placed " .. action.unit .. " #" .. action.id, 2)
+                    break
+                end
+
+                if isFatalReplayError(placeError) then
+                    stopWithError(placeError, 6)
+                    break
+                end
+
+                state.placeRetries = (state.placeRetries or 0) + 1
+                setReplayStatus(string.format("Auto-retry %d | place %s #%s", state.placeRetries, action.unit, tostring(action.id)))
+                task.wait(replayBackoff(state.placeRetries))
+            end
+
+        elseif action.type == "upgrade" then
+            local tower, restoreError = restore(action.id)
+            if not tower then
+                stopWithError(restoreError, 6)
+                break
+            end
+
+            while replaying and session.alive and getLevel(tower) < (tonumber(action.level) or getLevel(tower) + 1) do
+                local ok, upgradeError = performUpgrade(tower, action.level)
+                if ok and tower.Parent and getLevel(tower) >= (tonumber(action.level) or getLevel(tower)) then
+                    break
+                end
+
+                if upgradeError == "tower missing" or not tower.Parent then
+                    tower, restoreError = restore(action.id)
+                    if not tower then
+                        stopWithError(restoreError, 6)
+                        break
+                    end
+                else
+                    local state = runtime[action.id]
+                    state.upgradeRetries = (state.upgradeRetries or 0) + 1
+                    setReplayStatus(string.format(
+                        "Waiting upgrade #%s | retry %d | %s",
+                        tostring(action.id),
+                        state.upgradeRetries,
+                        tostring(upgradeError)
+                    ))
+                    task.wait(replayBackoff(state.upgradeRetries))
+                end
+            end
+
+            if replaying then
+                runtime[action.id].level = math.max(runtime[action.id].level or 0, tonumber(action.level) or getLevel(tower))
+            end
+
+        elseif action.type == "target" then
+            local tower, restoreError = restore(action.id)
+            if not tower then
+                stopWithError(restoreError, 6)
+                break
+            end
+
+            local targetRetries = 0
+            while replaying and session.alive do
+                local ok, targetError = performTarget(tower, action.mode)
+                if ok then
+                    runtime[action.id].target = action.mode
+                    break
+                end
+                if isFatalReplayError(targetError) and targetError ~= "tower missing" then
+                    stopWithError(targetError, 5)
+                    break
+                end
+                if not tower.Parent then
+                    tower, targetError = restore(action.id)
+                    if not tower then
+                        stopWithError(targetError, 5)
+                        break
+                    end
+                end
+                targetRetries = targetRetries + 1
+                setReplayStatus(string.format("Auto-retry %d | target #%s -> %s", targetRetries, tostring(action.id), tostring(action.mode)))
+                task.wait(replayBackoff(targetRetries))
+            end
+
+        elseif action.type == "ability" then
+            local tower, restoreError = restore(action.id)
+            if not tower then
+                stopWithError(restoreError, 6)
+                break
+            end
+
+            while replaying and session.alive do
+                local ok, abilityError = performAbility(tower, action.ability)
+                if ok then
+                    break
+                end
+
+                if abilityError == "tower missing" or not tower.Parent then
+                    tower, restoreError = restore(action.id)
+                    if not tower then
+                        stopWithError(restoreError, 5)
+                        break
+                    end
+                elseif abilityError == "ability handler is missing" then
+                    stopWithError(abilityError, 5)
+                    break
+                else
+                    local state = runtime[action.id]
+                    state.abilityRetries = (state.abilityRetries or 0) + 1
+                    setReplayStatus(string.format(
+                        "Waiting %s #%s | retry %d | %s",
+                        tostring(action.ability),
+                        tostring(action.id),
+                        state.abilityRetries,
+                        tostring(abilityError)
+                    ))
+                    task.wait(replayBackoff(state.abilityRetries))
+                end
+            end
+
+        elseif action.type == "skip" then
+            local ok, skipError = performSkip()
+            if not ok then
+                stopWithError(skipError, 5)
+                break
+            end
+            notify("Replay", "Skipped wave " .. tostring(action.wave or getWave()), 2)
+
+        elseif action.type == "sell" then
+            local tower, restoreError = restore(action.id)
+            if not tower then
+                stopWithError(restoreError, 6)
+                break
+            end
+
+            local ok, sellError = performSell(tower)
+            if not ok then
+                stopWithError(sellError, 5)
+                break
+            end
+
+            runtime[action.id].sold = true
+            runtime[action.id].tower = nil
+        else
+            stopWithError("unsupported action: " .. tostring(action.type), 5)
+            break
+        end
+
+        if replaying then
+            processed = index
+        end
+    end
+
+    local finished = replaying and session.alive and not replayStopRequested and not replayError
+    replaying = false
+    replayTaskRunning = false
+
+    if not session.alive then
+        return
+    end
+
+    if finished then
+        notify("Replay finished", "All actions completed", 4)
+        setRecorderState("replay_finished")
+        setReplayStatus(string.format("Finished | %d/%d", processed, #macro.actions))
+    else
+        setRecorderState("replay_stopped")
+        if replayError then
+            setReplayStatus("Stopped: " .. tostring(replayError))
+        else
+            setReplayStatus(string.format("Stopped | %d/%d", processed, #macro.actions))
+        end
+    end
+end
+
+local function startRecording()
+    if recording then
+        return
+    end
+
+    if replaying or replayTaskRunning then
+        notify("Recorder error", "Wait for Replay to stop before starting Recorder", 4)
+        return
+    end
+
+    local towers = getTowers()
+    if not towers then
+        notify("Recorder error", "workspace.Towers was not found", 5)
+        return
+    end
+
+    local bound, bindError = bindGameSources()
+    if not bound then
+        notify("Recorder error", bindError, 5)
+        return
+    end
+    ensurePlacementRecorder()
+
+    actions = {}
+    ids = {}
+    baselineTowers = setmetatable({}, { __mode = "k" })
+    nextId = 1
+    macroMap = getMapName()
+    macroDeck = session.getDeckSnapshot()
+    placementAttempt = nil
+    recentPlacement = nil
+    table.clear(session.placementQueue)
+    session.pendingTowerActions = setmetatable({}, { __mode = "k" })
+    recordedSkipWaves = {}
+    pendingSkipWave = nil
+    pendingSkipAt = 0
+    lastSkipConfirmationWave = nil
+    lastSkipConfirmationAt = 0
+    recording = true
+    resetLogger(true)
+
+    for tower, state in pairs(towerState) do
+        if tower.Parent == towers then
+            state.recordedLevel = getLevel(tower)
+            state.target = getTarget(tower)
+            state.cooldowns = {}
+            state.sold = false
+        end
+    end
+
+    -- Existing towers are only a baseline. Recording starts from this click;
+    -- we do not retroactively serialize towers that were already on the map.
+    for _, tower in ipairs(towers:GetChildren()) do
+        if isMine(tower) then
+            baselineTowers[tower] = true
+            bindTower(tower)
+        end
+    end
+
+    setRecorderState("recording")
+    notify("Recording started", "Map: " .. macroMap .. " | Deck: " .. session.compactDeckText(macroDeck), 4)
+end
+
+local function stopRecording()
+    if not recording then
+        notify("Macro recorder", "Recording is not running", 3)
+        return
+    end
+
+    setRecorderState("saving")
+
+    -- One final authoritative pass before freezing the recorder. This repairs a
+    -- TowerPlaced/Configuration replication race instead of silently saving a
+    -- half-recorded macro.
+    local towers = getTowers()
+    if towers then
+        for _, tower in ipairs(towers:GetChildren()) do
+            if tower:IsA("Model") and isMine(tower) then
+                bindTower(tower)
+                if not baselineTowers[tower] and not ids[tower] then
+                    onTowerPlaced(tower)
+                end
+            end
+        end
+    end
+
+    local drainStarted = os.clock()
+    while session.alive and os.clock() - drainStarted < 5.25 do
+        local pending = false
+
+        for tower in pairs(session.pendingTowerRecords) do
+            if tower then
+                pending = true
+                break
+            end
+        end
+
+        if not pending then
+            for tower, queued in pairs(session.pendingTowerActions) do
+                if queued and #queued > 0 and not ids[tower] and tower and tower.Parent == getTowers() then
+                    pending = true
+                    onTowerPlaced(tower)
+                    break
+                end
+            end
+        end
+
+        if not pending then
+            break
+        end
+        task.wait(0.04)
+    end
+
+    -- Flush everything whose Place was confirmed during the drain window.
+    local unresolved = 0
+    for tower, queued in pairs(session.pendingTowerActions) do
+        if ids[tower] then
+            flushTowerActions(tower)
+        elseif queued and #queued > 0 then
+            unresolved = unresolved + #queued
+        end
+    end
+
+    recording = false
+    placementAttempt = nil
+    recentPlacement = nil
+    table.clear(session.placementQueue)
+    freezeLogger()
+
+    if unresolved > 0 then
+        notify(
+            "Recorder warning",
+            tostring(unresolved) .. " action(s) could not be attached to a confirmed Place and were not serialized",
+            6
+        )
+    end
+
+    if saveMacro() then
+        setRecorderState("saved")
+    else
+        setRecorderState("save_failed")
+    end
+end
+
+local function selfCheck()
+    local config = findPlacementConfiguration()
+    local towers = getTowers()
+    local detects = getDetects()
+    local units = ReplicatedStorage:FindFirstChild("Units")
+    local module = ReplicatedStorage:FindFirstChild("Modules")
+        and ReplicatedStorage.Modules:FindFirstChild("CTDModule")
+    local safe = player:FindFirstChild("LocalSafeData")
+    local cash = safe and safe:FindFirstChild("CashREADONLY")
+    local gameVals = getGameVals()
+    local nativeAutoSkip = getNativeAutoSkipSetting()
+    local settingsRemote = getSettingsRemote()
+
+    local checks = {
+        { "PlayerGui.Configuration", config ~= nil },
+        { "UnitChoosed", config and config:FindFirstChild("UnitChoosed") ~= nil },
+        { "UnitOrientation", config and config:FindFirstChild("UnitOrientation") ~= nil },
+        { "CommencingPlace", config and config:FindFirstChild("CommencingPlace") ~= nil },
+        { "workspace.Towers", towers ~= nil },
+        { "EverythingDetects", detects ~= nil },
+        { "ReplicatedStorage.Units", units ~= nil },
+        { "Remotes.PlaceUnit", remotes:FindFirstChild("PlaceUnit") ~= nil },
+        { "Remotes.UpgradeUnit", remotes:FindFirstChild("UpgradeUnit") ~= nil },
+        { "Remotes.TargetUnit", remotes:FindFirstChild("TargetUnit") ~= nil },
+        { "Remotes.RemoveUnit", remotes:FindFirstChild("RemoveUnit") ~= nil },
+        { "Modules.CTDModule", module ~= nil },
+        { "CashREADONLY", cash ~= nil },
+        { "GameVals.AbleToSkip", gameVals and gameVals:FindFirstChild("AbleToSkip") ~= nil },
+        { "GameVals.WaveTimeSkipped", gameVals and gameVals:FindFirstChild("WaveTimeSkipped") ~= nil },
+        { "PlayerData.Settings.AutoSkip", nativeAutoSkip ~= nil },
+        { "Settings AutoSkip RemoteEvent", settingsRemote ~= nil },
+    }
+
+    local lines = { "Map: " .. getMapName(), "Wave: " .. tostring(getWave()) }
+    local allGood = true
+    for _, check in ipairs(checks) do
+        local good = check[2] == true

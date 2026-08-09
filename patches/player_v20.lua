@@ -1,7 +1,7 @@
 -- XOMA unified Player patch
--- Build: PASS11-UNIFIED-PLAYER-READY-V21
+-- Build: PASS13-UNIFIED-PLAYER-READY-V23
 -- Makes Replay use the recorder-generated XOMA strategy format and installs the
--- exact game2 Ready Up signal fix before replay can enter the pre-game gate.
+-- exact Ready callback patch before replay can enter the pre-game gate.
 
 local environment = typeof(getgenv) == "function" and getgenv() or _G
 local session = environment.CTDIG_SESSION
@@ -26,8 +26,8 @@ end
 readyChunk()
 
 if session.unifiedPlayerV20Installed == true then
-    session.replayBuild = "PASS11-UNIFIED-PLAYER-READY-V21"
-    session.autoBuild = "PASS11-UNIFIED-PLAYER-READY-V21"
+    session.replayBuild = "PASS13-UNIFIED-PLAYER-READY-V23"
+    session.autoBuild = "PASS13-UNIFIED-PLAYER-READY-V23"
     return session.XOMA
 end
 
@@ -93,7 +93,7 @@ session.recorder.replayMacro = function(overrideMacro)
 end
 
 session.unifiedPlayerV20Installed = true
-session.replayBuild = "PASS11-UNIFIED-PLAYER-READY-V21"
-session.autoBuild = "PASS11-UNIFIED-PLAYER-READY-V21"
+session.replayBuild = "PASS13-UNIFIED-PLAYER-READY-V23"
+session.autoBuild = "PASS13-UNIFIED-PLAYER-READY-V23"
 
 return session.XOMA

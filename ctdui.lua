@@ -1,5 +1,5 @@
 -- XOMA / CTDIG bootstrap
--- Build: PASS10-UNIFIED-PLAYER-V20
+-- Build: PASS12-NOINPUT-REPLAYSAFE-V22
 -- Reuses an already-loaded XOMA session so strategy files can be executed
 -- directly by the Player without recursively rebuilding/cleaning the hub.
 
@@ -26,104 +26,9 @@ then
     return existingSession.XOMA
 end
 
--- Start Auto Ready / difficulty voting BEFORE the large hub finishes loading.
--- New Recorder files set XOMA_AUTOEXEC_PREFLIGHT.Difficulty before this loader.
--- Old strategies stay compatible and use the current/default Normal difficulty.
-task.spawn(function()
-    local Players = game:GetService("Players")
-    local Workspace = game:GetService("Workspace")
-    local player = Players.LocalPlayer
-    local voting = Workspace:FindFirstChild("Voting") or Workspace:WaitForChild("Voting", 15)
-    if not player or not voting then
-        return
-    end
-
-    local preflight = environment.XOMA_AUTOEXEC_PREFLIGHT
-    local wanted = type(preflight) == "table" and tostring(preflight.Difficulty or "") or ""
-    if wanted == "" then
-        local current = Workspace:FindFirstChild("Difficulty")
-        wanted = current and tostring(current.Value or "") or ""
-    end
-    if wanted == "" or wanted == "None" then
-        wanted = "Normal"
-    end
-
-    local function click(button)
-        if not button or not button:IsA("GuiButton")
-            or button.AbsoluteSize.X <= 0 or button.AbsoluteSize.Y <= 0
-        then
-            return false
-        end
-
-        local center = button.AbsolutePosition + (button.AbsoluteSize / 2)
-        local ok, vim = pcall(game.GetService, game, "VirtualInputManager")
-        if ok and vim then
-            local sent = pcall(function()
-                vim:SendMouseButtonEvent(center.X, center.Y, 0, true, game, 0)
-                task.wait()
-                vim:SendMouseButtonEvent(center.X, center.Y, 0, false, game, 0)
-            end)
-            if sent then
-                return true
-            end
-        end
-
-        if typeof(firesignal) == "function" then
-            return pcall(function()
-                firesignal(button.MouseButton1Click)
-            end)
-        end
-
-        return false
-    end
-
-    local playerGui = player:FindFirstChildOfClass("PlayerGui") or player:WaitForChild("PlayerGui", 8)
-    local votingGui = playerGui and (playerGui:FindFirstChild("VotingGui") or playerGui:WaitForChild("VotingGui", 8))
-    if not votingGui then
-        return
-    end
-
-    local waitingDone = voting:FindFirstChild("WaitingRoomDone") or voting:WaitForChild("WaitingRoomDone", 5)
-    local readyButton = votingGui:FindFirstChild("WaitingRoom") or votingGui:WaitForChild("WaitingRoom", 5)
-    local readyDeadline = os.clock() + 10
-    local lastReadyClick = 0
-
-    while waitingDone and waitingDone.Value == false and os.clock() < readyDeadline do
-        if readyButton and readyButton.Visible and os.clock() - lastReadyClick >= 0.55 then
-            click(readyButton)
-            lastReadyClick = os.clock()
-        end
-        task.wait(0.1)
-    end
-
-    local startValue = voting:FindFirstChild("Start") or voting:WaitForChild("Start", 5)
-    local votes = voting:FindFirstChild("DifficultyVotes") or voting:WaitForChild("DifficultyVotes", 5)
-    local holder = votingGui:FindFirstChild("DifficultyHolder") or votingGui:WaitForChild("DifficultyHolder", 5)
-    local button = holder and (holder:FindFirstChild(wanted) or holder:WaitForChild(wanted, 5))
-    local countdownGui = votingGui:FindFirstChild("Countdown") or votingGui:WaitForChild("Countdown", 5)
-    local buttonsReady = countdownGui and (countdownGui:FindFirstChild("ButtonsReady") or countdownGui:WaitForChild("ButtonsReady", 5))
-    local voteDeadline = os.clock() + 12
-    local lastVoteClick = 0
-
-    while os.clock() < voteDeadline do
-        local folder = votes and votes:FindFirstChild(wanted)
-        if folder and folder:FindFirstChild(player.Name) then
-            break
-        end
-        if startValue and startValue.Value == true then
-            break
-        end
-        if (not buttonsReady or buttonsReady.Value == true)
-            and button and button:IsA("GuiButton")
-            and button.Visible and button.Selectable ~= false
-            and os.clock() - lastVoteClick >= 0.55
-        then
-            click(button)
-            lastVoteClick = os.clock()
-        end
-        task.wait(0.1)
-    end
-end)
+-- Do not synthesize any user input during bootstrap. The macro only stores its
+-- wanted difficulty in XOMA_AUTOEXEC_PREFLIGHT here. Ready/difficulty handling
+-- is installed after core startup by the input-free ready patch.
 
 local function fetchParts(base, count, workers)
     local parts = table.create(count)
@@ -172,6 +77,22 @@ local coreSource = fetchParts(
     16,
     4
 )
+
+-- Replay can run from an executor thread that is allowed to control the game but
+-- not allowed to mutate Obsidian's internal Plugin-capability UI Instances.
+-- Status text is non-essential, so make the two SetText calls inside the shared
+-- setLabelText helper non-fatal. This keeps W0 Place/Upgrade execution alive.
+coreSource = coreSource:gsub(
+    "label:SetText%(text%)",
+    "pcall(label.SetText, label, text)",
+    1
+)
+coreSource = coreSource:gsub(
+    "option:SetText%(text%)",
+    "pcall(option.SetText, option, text)",
+    1
+)
+
 local coreChunk, coreError = loadstring(coreSource)
 if not coreChunk then
     error("XOMA core compile failed: " .. tostring(coreError))

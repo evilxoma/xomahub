@@ -1,5 +1,5 @@
 -- XOMA / CTDIG bootstrap
--- Build: PASS21-ENDSCREEN-GATE-V31
+-- Build: PASS23-NONBLOCKING-SKIP-V33
 -- Reuses an already-loaded XOMA session so strategy files can be executed
 -- directly by the Player without recursively rebuilding/cleaning the hub.
 
@@ -162,6 +162,78 @@ coreSource = coreSource:gsub(
     1
 )
 
+-- Recorder can save Skip followed by more actions on the SAME wave. The old
+-- performSkip blocked until the wave changed, so those same-wave actions were
+-- delayed to the next wave (W8 in the current strategy is exactly Skip -> Place
+-- -> Upgrade -> Upgrade). A Skip is a request, not a barrier: turn native
+-- AutoSkip on and immediately continue replay. If CTDIG only enabled it
+-- temporarily, restore the prior setting asynchronously after that wave ends.
+coreSource = coreSource:gsub(
+    "local function performSkip%(%)%s+.-%s+return confirmed, confirmed and nil or \"skip was not confirmed\"%s+end",
+    [[local function performSkip(targetWave)
+    local target = math.max(0, math.floor(tonumber(targetWave) or getWave()))
+    local current = getWave()
+
+    -- A late Skip action must never skip the NEXT wave. If its recorded wave is
+    -- already over, the requested skip is already satisfied.
+    if current > target then
+        return true
+    end
+
+    local setting = getNativeAutoSkipSetting()
+    local wasEnabled = setting and setting.Value == true or false
+    local keepEnabled = Toggles.CTDIGAutoSkip and Toggles.CTDIGAutoSkip.Value == true or false
+
+    session.replaySkipSerial = (tonumber(session.replaySkipSerial) or 0) + 1
+    local serial = session.replaySkipSerial
+
+    local ok, err = setNativeAutoSkip(true)
+    if not ok then
+        -- Do not freeze the macro on Skip. Retry the native request in the
+        -- background while this recorded wave is still current.
+        task.spawn(function()
+            while session.alive and replaying and getWave() <= target do
+                local retryOk = setNativeAutoSkip(true)
+                if retryOk then
+                    break
+                end
+                task.wait(0.2)
+            end
+        end)
+    end
+
+    if not wasEnabled and not keepEnabled then
+        task.spawn(function()
+            while session.alive and getWave() <= target do
+                task.wait(0.05)
+            end
+
+            -- A newer Skip owns the setting now; never let an older cleanup
+            -- turn AutoSkip off underneath a later wave's request.
+            if session.alive and session.replaySkipSerial == serial then
+                setNativeAutoSkip(false)
+            end
+        end)
+    end
+
+    print("[XOMA V33] Skip W" .. tostring(target) .. " requested non-blocking")
+    return true, ok and nil or tostring(err)
+end]],
+    1
+)
+coreSource = coreSource:gsub(
+    "local ok, skipError = performSkip%(%s*%)",
+    "local ok, skipError = performSkip(action.wave)",
+    1
+)
+
+-- Newly recorded strategies should use the cache-busted bootstrap.
+coreSource = coreSource:gsub(
+    'local RAW_CORE_URL = "https://raw%.githubusercontent%.com/evilxoma/xomahub/refs/heads/main/ctdui%.lua"',
+    'local RAW_CORE_URL = "https://raw.githubusercontent.com/evilxoma/xomahub/refs/heads/main/ctdui_v33.lua"',
+    1
+)
+
 local coreChunk, coreError = loadstring(coreSource)
 if not coreChunk then
     error("XOMA core compile failed: " .. tostring(coreError))
@@ -171,7 +243,7 @@ local XOMA = coreChunk()
 local activeSession = environment.CTDIG_SESSION
 if type(activeSession) == "table" then
     activeSession.dataModel = game
-    activeSession.bootstrapBuild = "PASS21-ENDSCREEN-GATE-V31"
+    activeSession.bootstrapBuild = "PASS23-NONBLOCKING-SKIP-V33"
 end
 
 local autoexecSource = game:HttpGet(
@@ -218,5 +290,14 @@ if not endActionChunk then
     error("XOMA V31 end-action patch compile failed: " .. tostring(endActionError))
 end
 XOMA = endActionChunk() or XOMA
+
+local inputSource = game:HttpGet(
+    "https://raw.githubusercontent.com/evilxoma/xomahub/refs/heads/main/patches/input_v32.lua"
+)
+local inputChunk, inputError = loadstring(inputSource)
+if not inputChunk then
+    error("XOMA V32 input patch compile failed: " .. tostring(inputError))
+end
+XOMA = inputChunk() or XOMA
 
 return XOMA

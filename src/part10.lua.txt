@@ -1,0 +1,486 @@
+    local wanted = tostring(value.Value or "")
+    return wanted ~= "" and wanted:upper() == keyText
+end
+
+local function recordUpgradeIntent(tower, source)
+    if not recording or replaying or not tower or not tower.Parent or not isMine(tower) then
+        return
+    end
+    bindLevel(tower)
+    local before = getLevel(tower)
+    task.spawn(function()
+        local started = os.clock()
+        while session.alive and recording and tower.Parent and os.clock() - started < 1.25 do
+            local current = getLevel(tower)
+            if current > before then
+                recordUpgrade(tower, current)
+                debugLog("upgrade confirmed via " .. tostring(source) .. " | " .. tower.Name .. " -> " .. tostring(current))
+                return
+            end
+            task.wait(0.035)
+        end
+    end)
+end
+
+local function recordTargetHotkeyIntent(tower, source)
+    if not recording or replaying or not tower or not tower.Parent or not isMine(tower) then
+        return
+    end
+    bindTarget(tower)
+    local state = ensureTowerState(tower)
+    local before = getTarget(tower) or state.target
+    task.spawn(function()
+        local started = os.clock()
+        while session.alive and recording and tower.Parent and os.clock() - started < 0.8 do
+            local mode = getTarget(tower)
+            if mode and mode ~= before then
+                if state.target ~= mode then
+                    state.target = mode
+                    queueTowerAction(tower, {
+                        type = "target",
+                        mode = mode,
+                    })
+                    debugLog("target confirmed via " .. tostring(source) .. " | " .. tower.Name .. " -> " .. mode)
+                end
+                return
+            end
+            task.wait(0.025)
+        end
+    end)
+end
+
+local function recordAbilityHotkeyIntent(tower, ability, source)
+    if not recording or replaying or not tower or not tower.Parent or not isMine(tower) then
+        return
+    end
+    local cooldown = tower:FindFirstChild(ability .. "Cooldown")
+    if not cooldown or not cooldown:IsA("ValueBase") then
+        return
+    end
+    bindCooldown(tower, cooldown)
+    local before = tonumber(cooldown.Value) or 0
+    if before > 0 then
+        return
+    end
+
+    local state = ensureTowerState(tower)
+    task.spawn(function()
+        local started = os.clock()
+        while session.alive and recording and tower.Parent and os.clock() - started < 0.8 do
+            local current = tonumber(cooldown.Value) or 0
+            if current > 0 then
+                local last = state.lastAbilityRecordedAt and state.lastAbilityRecordedAt[ability] or 0
+                if os.clock() - last > 0.2 then
+                    state.lastAbilityRecordedAt = state.lastAbilityRecordedAt or {}
+                    state.lastAbilityRecordedAt[ability] = os.clock()
+                    queueTowerAction(tower, {
+                        type = "ability",
+                        ability = ability,
+                    })
+                    debugLog("ability confirmed via " .. tostring(source) .. " | " .. tower.Name .. " -> " .. ability)
+                end
+                return
+            end
+            task.wait(0.025)
+        end
+    end)
+end
+
+local function bindUpgradeButton(button)
+    if not button or button.Name ~= "UpgradeButton" or not button:IsA("GuiButton") then
+        return
+    end
+    local bindings = session.sourceBindings
+    if bindings.upgradeButtons[button] then
+        return
+    end
+    bindings.upgradeButtons[button] = true
+
+    local function onIntent(source)
+        local tower = resolveTowerFromActionButton(button)
+        if tower then
+            recordUpgradeIntent(tower, source)
+        end
+    end
+
+    connect(button.MouseButton1Down, function()
+        onIntent("UpgradeButton.MouseButton1Down")
+    end)
+    connect(button.Activated, function()
+        onIntent("UpgradeButton.Activated")
+    end)
+end
+
+local function bindRecorderActionUi()
+    if not playerGui then
+        return
+    end
+
+    for _, descendant in ipairs(playerGui:GetDescendants()) do
+        bindSellButton(descendant)
+        bindUpgradeButton(descendant)
+    end
+
+    local bindings = session.sourceBindings
+    if not bindings.actionGuis[playerGui] then
+        bindings.actionGuis[playerGui] = true
+        connect(playerGui.DescendantAdded, function(descendant)
+            if session.alive then
+                bindSellButton(descendant)
+                bindUpgradeButton(descendant)
+            end
+        end)
+    end
+end
+
+local function bindRecorderHotkeys()
+    local bindings = session.sourceBindings
+    if bindings.hotkeysBound then
+        return
+    end
+    bindings.hotkeysBound = true
+
+    connect(UserInputService.InputBegan, function(input, gameProcessed)
+        if not session.alive or not recording or replaying then
+            return
+        end
+        if UserInputService:GetFocusedTextBox() then
+            return
+        end
+
+        local settings = recorderSettings()
+        local tower = selectedTowerFromGui()
+        if not settings or not tower then
+            return
+        end
+
+        local key = hotkeyText(input)
+        if key == "" then
+            return
+        end
+
+        if settingMatchesHotkey(settings, "SellHotkey", key)
+            or input.KeyCode == Enum.KeyCode.ButtonY then
+            recordSellIntent(tower, "SellHotkey:" .. key)
+            return
+        end
+
+        if settingMatchesHotkey(settings, "UpgradeHotkey", key)
+            or input.KeyCode == Enum.KeyCode.ButtonA then
+            recordUpgradeIntent(tower, "UpgradeHotkey:" .. key)
+            return
+        end
+
+        if settingMatchesHotkey(settings, "TargetingHotkey", key) then
+            recordTargetHotkeyIntent(tower, "TargetingHotkey:" .. key)
+            return
+        end
+
+        for abilityIndex = 1, 9 do
+            local settingName = "Ability" .. abilityIndex .. "Hotkey"
+            if settingMatchesHotkey(settings, settingName, key) then
+                recordAbilityHotkeyIntent(
+                    tower,
+                    "Ability" .. abilityIndex,
+                    settingName .. ":" .. key
+                )
+                return
+            end
+        end
+    end)
+end
+
+local function bindTower(tower)
+    if not tower or not tower.Parent or not isMine(tower) then
+        return
+    end
+
+    local firstBind = towerConnections[tower] == nil
+    towerConnections[tower] = towerConnections[tower] or {}
+    ensureTowerState(tower)
+
+    bindLevel(tower)
+    bindTarget(tower)
+
+    for _, child in ipairs(tower:GetChildren()) do
+        if child:IsA("ValueBase") and child.Name:match("^Ability%d+Cooldown$") then
+            bindCooldown(tower, child)
+        end
+    end
+
+    if not firstBind then
+        return
+    end
+
+    towerConnect(tower, tower.ChildAdded, function(child)
+        if child.Name == "BeingUpgradedddd" then
+            task.defer(function()
+                if not session.alive or not tower.Parent then
+                    return
+                end
+                bindLevel(tower)
+                bindTarget(tower)
+                recordUpgrade(tower)
+            end)
+        elseif child.Name == "Configuration" then
+            task.defer(function()
+                if not session.alive or not tower.Parent then
+                    return
+                end
+                bindLevel(tower)
+                bindTarget(tower)
+                recordUpgrade(tower)
+            end)
+        elseif child.Name == "OtherConfig" then
+            task.defer(function()
+                if session.alive and tower.Parent then
+                    bindTarget(tower)
+                end
+            end)
+        elseif child.Name:match("^Ability%d+Cooldown$") then
+            bindCooldown(tower, child)
+        end
+    end, "children")
+
+    local function observeSellMarker()
+        local state = towerState[tower]
+        if state and state.ownedByRecorderPlayer
+            and tower:GetAttribute("AlreadyBeingSold") == true then
+            recordSellIntent(tower, "AlreadyBeingSold")
+        end
+    end
+
+    towerConnect(tower, tower:GetAttributeChangedSignal("AlreadyBeingSold"), observeSellMarker, "sold")
+    observeSellMarker()
+
+    towerConnect(tower, tower.AncestryChanged, function()
+        task.defer(function()
+            if tower.Parent ~= getTowers() then
+                disconnectTower(tower)
+            end
+        end)
+    end, "ancestry")
+end
+
+local function onTowerPlaced(tower)
+    if not tower or session.pendingTowerRecords[tower] then
+        return
+    end
+
+    session.pendingTowerRecords[tower] = true
+    task.spawn(function()
+        local ok, err = xpcall(function()
+            local towers = getTowers()
+            if not towers then
+                return
+            end
+
+            local started = os.clock()
+            while session.alive and os.clock() - started < 5 do
+                local placedOnPart = tower:FindFirstChild("PlacedOnPart")
+                local surfaceReady = placedOnPart and placedOnPart:IsA("ObjectValue")
+                    and placedOnPart.Value ~= nil
+                local coreReady = tower.Parent == towers and getOwner(tower) and getRoot(tower)
+                if coreReady and (not recording or surfaceReady or os.clock() - started >= 1.25) then
+                    break
+                end
+                task.wait()
+            end
+
+            if not session.alive or tower.Parent ~= towers or not isMine(tower) then
+                return
+            end
+
+            bindTower(tower)
+
+            if recording and not replaying and not baselineTowers[tower] and not ids[tower] then
+                local placement = manualPlacementFor(tower.Name)
+                if recordPlace(tower, placement) and placement == recentPlacement then
+                    recentPlacement = nil
+                end
+            end
+        end, tracebackError)
+
+        session.pendingTowerRecords[tower] = nil
+        if not ok and session.alive then
+            warn("[CTDIG] Tower recorder recovery error:\n" .. tostring(err))
+        end
+    end)
+end
+
+local function bindGameSources()
+    local bindings = session.sourceBindings
+    local towers = getTowers()
+    if not towers and next(bindings.towerFolders) == nil then
+        towers = Workspace:WaitForChild("Towers", 15)
+    end
+    if not towers then
+        return false, "workspace.Towers was not found"
+    end
+
+    local detects = getDetects()
+    bindSellUi()
+    bindRecorderActionUi()
+    bindRecorderHotkeys()
+
+    for _, tower in ipairs(towers:GetChildren()) do
+        if isMine(tower) then
+            bindTower(tower)
+        end
+    end
+
+    if not bindings.towerFolders[towers] then
+        bindings.towerFolders[towers] = true
+        connect(towers.ChildAdded, function(tower)
+            if session.alive then
+                onTowerPlaced(tower)
+            end
+        end)
+
+        connect(towers.ChildRemoved, function(tower)
+            task.defer(function()
+                if tower.Parent ~= towers then
+                    disconnectTower(tower)
+                end
+            end)
+        end)
+    end
+
+    if detects and not bindings.detects[detects] then
+        bindings.detects[detects] = true
+        connect(detects.ChildAdded, function(event)
+            task.defer(function()
+                if not session.alive or not event:IsA("ObjectValue") then
+                    return
+                end
+
+                local tower = event.Value
+                if not tower then
+                    return
+                end
+
+                if event.Name == "TowerPlaced" then
+                    onTowerPlaced(tower)
+                else
+                    local level = event.Name:match("^TowerUpgraded(%d+)$")
+                    if not level then
+                        return
+                    end
+
+                    bindTower(tower)
+                    recordUpgrade(tower, tonumber(level))
+                end
+            end)
+        end)
+    elseif not detects then
+        debugLog("EverythingDetects not found; using confirmed tower/config fallback events")
+    end
+
+    local gameVals = getGameVals()
+    local skipping = Workspace:FindFirstChild("Skipping")
+
+    if skipping and not bindings.skipping[skipping] then
+        bindings.skipping[skipping] = true
+        connect(skipping.ChildAdded, function(entry)
+            if recording and not replaying and entry.Name == player.Name then
+                pendingSkipWave = getWave()
+                pendingSkipAt = os.clock()
+            end
+        end)
+
+        connect(skipping.ChildRemoved, function(entry)
+            if entry.Name ~= player.Name or pendingSkipWave == nil then
+                return
+            end
+
+            local pending = pendingSkipWave
+            task.delay(1, function()
+                if session.alive and pendingSkipWave == pending and not recordedSkipWaves[pending] then
+                    pendingSkipWave = nil
+                    pendingSkipAt = 0
+                end
+            end)
+        end)
+    end
+
+    if gameVals and not bindings.gameVals[gameVals] then
+        bindings.gameVals[gameVals] = true
+        local waveTimeSkipped = gameVals:FindFirstChild("WaveTimeSkipped")
+        if waveTimeSkipped and waveTimeSkipped:IsA("ValueBase") then
+            local previous = tonumber(waveTimeSkipped.Value) or 0
+            connect(waveTimeSkipped.Changed, function(value)
+                local current = tonumber(value) or 0
+                if current > previous then
+                    skipDetected(getWave(), "WaveTimeSkipped")
+                end
+                previous = current
+            end)
+        end
+
+        local autoSkippedWaves = gameVals:FindFirstChild("AutoSkippedWaves")
+        if autoSkippedWaves and autoSkippedWaves:IsA("ValueBase") then
+            local previous = tonumber(autoSkippedWaves.Value) or 0
+            connect(autoSkippedWaves.Changed, function(value)
+                local current = tonumber(value) or 0
+                if current > previous then
+                    skipDetected(getWave(), "AutoSkippedWaves")
+                end
+                previous = current
+            end)
+        end
+    end
+
+    local map = Workspace:FindFirstChild("Map")
+    local mapConfig = map and map:FindFirstChild("Configuration")
+    local wave = mapConfig and mapConfig:FindFirstChild("Wave")
+    if wave and wave:IsA("ValueBase") and not bindings.waves[wave] then
+        bindings.waves[wave] = true
+        connect(wave.Changed, function()
+            if recording then
+                refreshRecorderStatus()
+            end
+        end)
+    end
+
+    return true
+end
+
+local LUA_RESERVED_KEYS = {
+    ["and"] = true,
+    ["break"] = true,
+    ["do"] = true,
+    ["else"] = true,
+    ["elseif"] = true,
+    ["end"] = true,
+    ["false"] = true,
+    ["for"] = true,
+    ["function"] = true,
+    ["goto"] = true,
+    ["if"] = true,
+    ["in"] = true,
+    ["local"] = true,
+    ["nil"] = true,
+    ["not"] = true,
+    ["or"] = true,
+    ["repeat"] = true,
+    ["return"] = true,
+    ["then"] = true,
+    ["true"] = true,
+    ["until"] = true,
+    ["while"] = true,
+}
+
+local function finiteMacroNumber(value)
+    value = tonumber(value)
+    if not value or value ~= value or value == math.huge or value == -math.huge then
+        return 0
+    end
+    return value
+end
+
+local function serializeValue(value, indent, seen)
+    indent = indent or 0
+    seen = seen or {}
+    local kind = type(value)
+
+    if kind == "string" then

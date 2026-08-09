@@ -1,0 +1,500 @@
+    end
+
+    setLabelText(loggerLabel, "CTDIGLog", table.concat(visible, "\n"))
+end
+
+local function resetLogger(active)
+    table.clear(logLines)
+    logHead = 1
+    logCount = 0
+    setLabelText(
+        loggerLabel,
+        "CTDIGLog",
+        active and "Recorder active. Waiting for actions." or "Logger inactive. Start Recorder."
+    )
+end
+
+local function freezeLogger()
+    if logCount == 0 then
+        setLabelText(loggerLabel, "CTDIGLog", "No recorder actions in last session.")
+    end
+end
+
+local function logRecorderAction(text)
+    if not recording then
+        return
+    end
+
+    text = tostring(text)
+    print("[CTDIG] " .. text)
+
+    if logCount < LOGGER_LIMIT then
+        local index = ((logHead + logCount - 1) % LOGGER_LIMIT) + 1
+        logLines[index] = text
+        logCount = logCount + 1
+    else
+        logLines[logHead] = text
+        logHead = (logHead % LOGGER_LIMIT) + 1
+    end
+
+    renderLogger()
+end
+
+local function debugLog(text)
+    print("[CTDIG] " .. tostring(text))
+end
+
+local function tracebackError(err)
+    if debug and type(debug.traceback) == "function" then
+        return debug.traceback(tostring(err), 2)
+    end
+    return tostring(err)
+end
+
+local function connect(signal, callback)
+    local connection = signal:Connect(callback)
+    connections[#connections + 1] = connection
+    return connection
+end
+
+local function disconnectTower(tower)
+    local list = towerConnections[tower]
+    if not list then
+        return
+    end
+
+    for _, connection in pairs(list) do
+        pcall(function()
+            connection:Disconnect()
+        end)
+    end
+
+    towerConnections[tower] = nil
+    towerState[tower] = nil
+    ids[tower] = nil
+end
+
+local function towerConnect(tower, signal, callback, key)
+    towerConnections[tower] = towerConnections[tower] or {}
+
+    if key and towerConnections[tower][key] then
+        pcall(function()
+            towerConnections[tower][key]:Disconnect()
+        end)
+    end
+
+    local connection = signal:Connect(callback)
+    if key then
+        towerConnections[tower][key] = connection
+    else
+        towerConnections[tower][#towerConnections[tower] + 1] = connection
+    end
+    return connection
+end
+
+local function findPlacementConfiguration()
+    if placementConfiguration
+        and placementConfiguration:IsDescendantOf(playerGui)
+        and placementConfiguration:FindFirstChild("UnitChoosed") then
+        return placementConfiguration
+    end
+
+    local direct = playerGui:FindFirstChild("Configuration")
+    if direct and direct:FindFirstChild("UnitChoosed") then
+        placementConfiguration = direct
+        return placementConfiguration
+    end
+
+    local main = playerGui:FindFirstChild("Main")
+    local mainConfig = main and main:FindFirstChild("Configuration")
+    if mainConfig and mainConfig:FindFirstChild("UnitChoosed") then
+        placementConfiguration = mainConfig
+        return placementConfiguration
+    end
+
+    local unitsGui = playerGui:FindFirstChild("UnitsListGui")
+    local unitsConfig = unitsGui and unitsGui:FindFirstChild("Configuration")
+    if unitsConfig and unitsConfig:FindFirstChild("UnitChoosed") then
+        placementConfiguration = unitsConfig
+        return placementConfiguration
+    end
+
+    for _, object in ipairs(playerGui:GetDescendants()) do
+        if object.Name == "Configuration" and object:FindFirstChild("UnitChoosed") then
+            placementConfiguration = object
+            return placementConfiguration
+        end
+    end
+end
+
+local function getMapName()
+    local map = Workspace:FindFirstChild("Map")
+    local trueName = map and map:FindFirstChild("TrueName")
+    return trueName and tostring(trueName.Value) or (map and map.Name or "Unknown")
+end
+
+local function getWave()
+    local map = Workspace:FindFirstChild("Map")
+    local config = map and map:FindFirstChild("Configuration")
+    local wave = config and config:FindFirstChild("Wave")
+    return wave and tonumber(wave.Value) or 0
+end
+
+function session.setWebhookStatus(text)
+    text = tostring(text or "Webhook")
+    session.webhook.lastStatus = text
+
+    pcall(function()
+        if session.webhookStatusLabel and type(session.webhookStatusLabel.SetText) == "function" then
+            session.webhookStatusLabel:SetText(text)
+        elseif Options.CTDIGWebhookStatus and type(Options.CTDIGWebhookStatus.SetText) == "function" then
+            Options.CTDIGWebhookStatus:SetText(text)
+        end
+    end)
+end
+
+function session.getWebhookRequest()
+    local env = type(getgenv) == "function" and getgenv() or _G
+
+    if type(env.request) == "function" then
+        return env.request
+    end
+    if type(env.http_request) == "function" then
+        return env.http_request
+    end
+    if type(env.syn) == "table" and type(env.syn.request) == "function" then
+        return env.syn.request
+    end
+    if type(env.http) == "table" and type(env.http.request) == "function" then
+        return env.http.request
+    end
+    if type(env.fluxus) == "table" and type(env.fluxus.request) == "function" then
+        return env.fluxus.request
+    end
+
+    return nil
+end
+
+function session.getWebhookRewards()
+    local service = Workspace:FindFirstChild("WorkspaceScriptService")
+    local rewards = service and service:FindFirstChild("Rewards")
+    if not rewards then
+        return "None"
+    end
+
+    local parts = {}
+
+    for _, value in ipairs(rewards:GetChildren()) do
+        if value:IsA("ValueBase")
+            and value.Name ~= "Result"
+            and value.Name ~= "BanishmentTimer"
+            and value.Name ~= "Coins"
+            and value.Name ~= "Exp"
+        then
+            local number = tonumber(value.Value)
+            if number then
+                if number ~= 0 then
+                    parts[#parts + 1] = value.Name .. ": " .. tostring(number)
+                end
+            elseif tostring(value.Value) ~= "" then
+                parts[#parts + 1] = value.Name .. ": " .. tostring(value.Value)
+            end
+        end
+    end
+
+    table.sort(parts)
+
+    if #parts == 0 then
+        return "None"
+    end
+
+    local result = table.concat(parts, "\n")
+    if #result > 900 then
+        result = result:sub(1, 897) .. "..."
+    end
+    return result
+end
+
+function session.getWebhookMatchSeconds()
+    -- Authoritative game timer used by the game's own EndFrame scripts.
+    local service = Workspace:FindFirstChild("WorkspaceScriptService")
+    local totalGameTime = service and service:FindFirstChild("TotalGameTime")
+
+    if totalGameTime and tonumber(totalGameTime.Value) then
+        return math.max(0, tonumber(totalGameTime.Value))
+    end
+
+    -- Fallback only if this game build does not expose TotalGameTime.
+    local endFrame = playerGui:FindFirstChild("EndFrame", true)
+    if endFrame then
+        local timeObject = endFrame:FindFirstChild("Time", true)
+        if timeObject and (timeObject:IsA("TextLabel") or timeObject:IsA("TextButton")) then
+            local value = tostring(timeObject.Text or "")
+
+            local h, m, s = value:match("(%d+):(%d+):(%d+)")
+            if h and m and s then
+                return tonumber(h) * 3600 + tonumber(m) * 60 + tonumber(s)
+            end
+
+            local mm, ss = value:match("(%d+):(%d+)")
+            if mm and ss then
+                return tonumber(mm) * 60 + tonumber(ss)
+            end
+        end
+    end
+
+    return nil
+end
+
+function session.getWebhookMatchTime()
+    local seconds = session.getWebhookMatchSeconds()
+    if not seconds then
+        return "Unknown"
+    end
+
+    seconds = math.max(0, math.floor(seconds + 0.5))
+    local hours = math.floor(seconds / 3600)
+    local minutes = math.floor(seconds / 60) % 60
+    local secs = seconds % 60
+
+    if hours > 0 then
+        return string.format("%d:%02d:%02d", hours, minutes, secs)
+    end
+
+    return string.format("%02d:%02d", minutes, secs)
+end
+
+function session.formatWebhookNumber(value)
+    value = tonumber(value)
+    if not value then
+        return "N/A"
+    end
+
+    value = math.floor(value + 0.5)
+
+    local sign = value < 0 and "-" or ""
+    local digits = tostring(math.abs(value))
+    local formatted = digits
+
+    while true do
+        local nextValue, count = formatted:gsub("^(%d+)(%d%d%d)", "%1,%2")
+        formatted = nextValue
+        if count == 0 then
+            break
+        end
+    end
+
+    return sign .. formatted
+end
+
+function session.getWebhookFarmStats()
+    local service = Workspace:FindFirstChild("WorkspaceScriptService")
+    local rewards = service and service:FindFirstChild("Rewards")
+
+    local coins = 0
+    local exp = 0
+
+    if rewards then
+        local coinsValue = rewards:FindFirstChild("Coins")
+        local expValue = rewards:FindFirstChild("Exp")
+
+        coins = coinsValue and tonumber(coinsValue.Value) or 0
+        exp = expValue and tonumber(expValue.Value) or 0
+    end
+
+    local seconds = session.getWebhookMatchSeconds()
+    local coinsPerHour
+    local expPerHour
+
+    if seconds and seconds > 0 then
+        coinsPerHour = coins * 3600 / seconds
+        expPerHour = exp * 3600 / seconds
+    end
+
+    return {
+        coins = coins,
+        exp = exp,
+        seconds = seconds,
+        coinsPerHour = coinsPerHour,
+        expPerHour = expPerHour,
+    }
+end
+
+function session.accountWebhookRun(result)
+    local farm = session.getWebhookFarmStats()
+    local summary = session.farmSession
+
+    summary.runs = (tonumber(summary.runs) or 0) + 1
+    if result == "Triumph" then
+        summary.wins = (tonumber(summary.wins) or 0) + 1
+    elseif result == "Defeat" then
+        summary.losses = (tonumber(summary.losses) or 0) + 1
+    end
+
+    summary.coins = (tonumber(summary.coins) or 0) + (tonumber(farm.coins) or 0)
+    summary.exp = (tonumber(summary.exp) or 0) + (tonumber(farm.exp) or 0)
+    summary.totalGameSeconds = (tonumber(summary.totalGameSeconds) or 0)
+        + (tonumber(farm.seconds) or 0)
+
+    return summary
+end
+
+function session.getWebhookSessionStats()
+    local summary = session.farmSession
+    local startedAt = tonumber(summary.startedAt) or os.time()
+    local totalGameSeconds = tonumber(summary.totalGameSeconds) or 0
+    local runtime = math.max(1, os.time() - startedAt, totalGameSeconds)
+    local runs = tonumber(summary.runs) or 0
+    local wins = tonumber(summary.wins) or 0
+    local losses = tonumber(summary.losses) or 0
+    local coins = tonumber(summary.coins) or 0
+    local exp = tonumber(summary.exp) or 0
+
+    return {
+        runs = runs,
+        wins = wins,
+        losses = losses,
+        coins = coins,
+        exp = exp,
+        runtime = runtime,
+        winRate = runs > 0 and (wins / runs * 100) or 0,
+        avgRunSeconds = runs > 0 and (totalGameSeconds / runs) or 0,
+        coinsPerHour = coins * 3600 / runtime,
+        expPerHour = exp * 3600 / runtime,
+    }
+end
+
+function session.formatWebhookDuration(seconds)
+    seconds = math.max(0, math.floor(tonumber(seconds) or 0))
+    local hours = math.floor(seconds / 3600)
+    local minutes = math.floor(seconds / 60) % 60
+    local secs = seconds % 60
+
+    if hours > 0 then
+        return string.format("%dh %02dm %02ds", hours, minutes, secs)
+    end
+
+    return string.format("%dm %02ds", minutes, secs)
+end
+
+function session.sendWebhook(result, isTest)
+    if session.webhook.busy then
+        return false, "busy"
+    end
+
+    local url = Options.CTDIGWebhookURL and tostring(Options.CTDIGWebhookURL.Value or "") or ""
+    url = url:gsub("^%s+", ""):gsub("%s+$", "")
+
+    if url == "" then
+        session.setWebhookStatus("Webhook: URL is empty")
+        return false, "URL is empty"
+    end
+
+    if not url:match("^https://[%w%.%-]+/api/webhooks/") then
+        session.setWebhookStatus("Webhook: invalid Discord webhook URL")
+        return false, "invalid Discord webhook URL"
+    end
+
+    local requestFn = session.getWebhookRequest()
+    if not requestFn then
+        session.setWebhookStatus("Webhook: executor request() unavailable")
+        return false, "request() unavailable"
+    end
+
+    session.webhook.busy = true
+    session.setWebhookStatus(isTest and "Webhook: sending test..." or "Webhook: sending result...")
+
+    local cleanResult = tostring(result or "Unknown")
+    local title
+    local color
+
+    if isTest then
+        title = "CTDIG Webhook Test"
+        color = 5793266
+    elseif cleanResult == "Triumph" then
+        title = "✅ Triumph"
+        color = 5763719
+    else
+        title = "❌ Defeat"
+        color = 15548997
+    end
+
+    local fields = {
+        {
+            name = "Player",
+            value = tostring(player.Name),
+            inline = true,
+        },
+        {
+            name = "Map",
+            value = tostring(getMapName()),
+            inline = true,
+        },
+        {
+            name = "Wave",
+            value = tostring(getWave()),
+            inline = true,
+        },
+        {
+            name = "Time",
+            value = tostring(session.getWebhookMatchTime()),
+            inline = true,
+        },
+        {
+            name = "Macro",
+            value = "ctdig.lua",
+            inline = true,
+        },
+    }
+
+    if not isTest then
+        local farm = session.getWebhookFarmStats()
+
+        fields[#fields + 1] = {
+            name = "🪙 Coins Earned",
+            value = session.formatWebhookNumber(farm.coins),
+            inline = true,
+        }
+
+        fields[#fields + 1] = {
+            name = "🪙 Coins / Hour",
+            value = farm.coinsPerHour
+                and ("≈ " .. session.formatWebhookNumber(farm.coinsPerHour) .. "/h")
+                or "N/A",
+            inline = true,
+        }
+
+        fields[#fields + 1] = {
+            name = "⭐ EXP Earned",
+            value = session.formatWebhookNumber(farm.exp),
+            inline = true,
+        }
+
+        fields[#fields + 1] = {
+            name = "⭐ EXP / Hour",
+            value = farm.expPerHour
+                and ("≈ " .. session.formatWebhookNumber(farm.expPerHour) .. "/h")
+                or "N/A",
+            inline = true,
+        }
+
+        local summary = session.getWebhookSessionStats()
+        fields[#fields + 1] = {
+            name = "📊 Session",
+            value = string.format(
+                "Run #%d\nWins: %d | Losses: %d\nWin rate: %.1f%%",
+                summary.runs,
+                summary.wins,
+                summary.losses,
+                summary.winRate
+            ),
+            inline = false,
+        }
+        fields[#fields + 1] = {
+            name = "🪙 Session Coins",
+            value = session.formatWebhookNumber(summary.coins)
+                .. "\n≈ "
+                .. session.formatWebhookNumber(summary.coinsPerHour)
+                .. "/h",
+            inline = true,
+        }

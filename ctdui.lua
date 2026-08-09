@@ -1,5 +1,5 @@
 -- XOMA / CTDIG bootstrap
--- Build: PASS12-NOINPUT-REPLAYSAFE-V22
+-- Build: PASS17-W0-PREGAME-V27
 -- Reuses an already-loaded XOMA session so strategy files can be executed
 -- directly by the Player without recursively rebuilding/cleaning the hub.
 
@@ -28,7 +28,7 @@ end
 
 -- Do not synthesize any user input during bootstrap. The macro only stores its
 -- wanted difficulty in XOMA_AUTOEXEC_PREFLIGHT here. Ready/difficulty handling
--- is installed after core startup by the input-free ready patch.
+-- is installed after core startup by the ready patch.
 
 local function fetchParts(base, count, workers)
     local parts = table.create(count)
@@ -132,5 +132,14 @@ if not playerChunk then
     error("XOMA Player patch compile failed: " .. tostring(playerError))
 end
 XOMA = playerChunk() or XOMA
+
+local w0Source = game:HttpGet(
+    "https://raw.githubusercontent.com/evilxoma/xomahub/refs/heads/main/patches/w0_v27.lua"
+)
+local w0Chunk, w0Error = loadstring(w0Source)
+if not w0Chunk then
+    error("XOMA W0 patch compile failed: " .. tostring(w0Error))
+end
+XOMA = w0Chunk() or XOMA
 
 return XOMA

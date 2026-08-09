@@ -12,6 +12,18 @@ local XOMA = loadstring(game:HttpGet(
 
 `ctdui.lua` returns the XOMA strategy API, so recorder-generated strategies keep the existing syntax.
 
+## AutoExec
+
+Put the generated strategy file (for example `ctdig.lua`) into your executor's `autoexec` / `autoexecute` folder.
+
+V17 routes `XOMA:Run()` by place automatically:
+
+- In lobby: wait for lobby data, verify the exact recorded deck, equip the matching saved loadout if needed, enter a free room-system elevator, open the recorded map with `FriendsOnly`, `Limit = 1`, `Classic`, then request teleport.
+- After Roblox teleports: the executor runs the same strategy from autoexec again. XOMA detects the match, waits for `Towers`, `Map.Configuration`, `PlayerData.Loadout`, map name and deck replication, binds match sources, then starts Replay.
+- Wrong map or wrong deck does not silently run the strategy.
+
+The lobby flow mirrors the game's `PlayerLoadouts(..., "EquipLoadout")` and `Remotes.Elevators:InvokeServer(room, "OpenRoom", payload)` / `"Teleport"` paths.
+
 ## Strategy API
 
 ```lua
@@ -32,4 +44,4 @@ XOMA:Run()
 
 The webhook reports per-run Coins, Coins/hour, EXP, EXP/hour, plus cumulative session runs, wins/losses, win rate, total Coins/EXP, session Coins/hour and EXP/hour, runtime, and average run duration.
 
-Current build: `PASS6-SESSION-XOMA-V16`.
+Current build: `PASS7-AUTOEXEC-V17`.

@@ -1,0 +1,259 @@
+            ready = session.auto.deckExactMatches(deck, wantedDeck)
+        else
+            ready = session.auto.deckContainsRequired(deck, required) == true
+        end
+
+        if ready then
+            notify(
+                "AutoExecute",
+                "Deck equipped: " .. session.compactDeckText(deck),
+                3
+            )
+            return true
+        end
+
+        task.wait(0.1)
+    end
+
+    return false, "deck did not update after EquipLoadout | current: "
+        .. session.compactDeckText(session.getDeckSnapshot())
+end
+
+function session.auto.isElevatorRoomCandidate(object)
+    if not object
+        or not (object:IsA("Folder") or object:IsA("Model"))
+    then
+        return false
+    end
+
+    return object:FindFirstChild("CurrentMap") ~= nil
+        and object:FindFirstChild("RoomOwner") ~= nil
+        and object:FindFirstChild("RoomOpen") ~= nil
+        and object:FindFirstChild("RoomEntryMode") ~= nil
+        and object:FindFirstChild("Limit") ~= nil
+        and object:FindFirstChild("MapMode") ~= nil
+        and object:FindFirstChild("CurrentPlayers") ~= nil
+        and object:FindFirstChild("baseplate", true) ~= nil
+end
+
+function session.auto.collectElevatorRooms()
+    local root = Workspace:FindFirstChild("Elevators")
+    local rooms = {}
+    if not root then
+        return rooms
+    end
+
+    for _, group in ipairs(root:GetChildren()) do
+        if group.Name ~= "ClassicElevators" then
+            for _, object in ipairs(group:GetDescendants()) do
+                if session.auto.isElevatorRoomCandidate(object) then
+                    rooms[#rooms + 1] = object
+                end
+            end
+        end
+    end
+
+    table.sort(rooms, function(a, b)
+        local ao = a:FindFirstChild("RoomOwner")
+        local bo = b:FindFirstChild("RoomOwner")
+        local ar = a:FindFirstChild("RoomOpen")
+        local br = b:FindFirstChild("RoomOpen")
+
+        local aOwned = ao and tostring(ao.Value) == player.Name
+        local bOwned = bo and tostring(bo.Value) == player.Name
+        if aOwned ~= bOwned then
+            return aOwned
+        end
+
+        local aFree = (not ao or tostring(ao.Value) == "")
+            and (not ar or ar.Value == false)
+        local bFree = (not bo or tostring(bo.Value) == "")
+            and (not br or br.Value == false)
+
+        if aFree ~= bFree then
+            return aFree
+        end
+
+        return a:GetFullName() < b:GetFullName()
+    end)
+
+    return rooms
+end
+
+function session.auto.moveIntoElevator(room)
+    local character = player.Character or player.CharacterAdded:Wait()
+    local root = character:FindFirstChild("HumanoidRootPart")
+        or character:FindFirstChild("Torso")
+        or character.PrimaryPart
+    local plate = room and room:FindFirstChild("baseplate", true)
+
+    if not root or not plate or not plate:IsA("BasePart") then
+        return false, "elevator root/baseplate missing"
+    end
+
+    local owner = room:FindFirstChild("RoomOwner")
+    local roomOpen = room:FindFirstChild("RoomOpen")
+
+    if owner
+        and tostring(owner.Value) ~= ""
+        and tostring(owner.Value) ~= player.Name
+    then
+        return false, "elevator is owned by " .. tostring(owner.Value)
+    end
+
+    if roomOpen
+        and roomOpen.Value == true
+        and (not owner or tostring(owner.Value) ~= player.Name)
+    then
+        return false, "elevator is already open"
+    end
+
+    for attempt = 1, 3 do
+        if not session.alive then
+            return false, "stopped"
+        end
+
+        root.CFrame = plate.CFrame * CFrame.new(0, 3, 0)
+
+        if typeof(firetouchinterest) == "function" then
+            pcall(function()
+                firetouchinterest(root, plate, 0)
+                task.wait(0.05)
+                firetouchinterest(root, plate, 1)
+            end)
+        end
+
+        local started = os.clock()
+        while session.alive and os.clock() - started < 2.25 do
+            if session.auto.playerInsideElevator(room) then
+                return true
+            end
+
+            if owner
+                and tostring(owner.Value) ~= ""
+                and tostring(owner.Value) ~= player.Name
+            then
+                break
+            end
+
+            task.wait(0.08)
+        end
+
+        status("enter elevator retry " .. tostring(attempt + 1))
+    end
+
+    -- The native lobby can call EnterElevator on the client before RoomOwner /
+    -- CurrentPlayers visibly replicate. OpenRoom is the authoritative check.
+    if not owner
+        or tostring(owner.Value) == ""
+        or tostring(owner.Value) == player.Name
+    then
+        return true
+    end
+
+    return false, "EnterElevator was not confirmed"
+end
+
+function session.auto.openMacroMapFromLobby(macro)
+    local elevators = remotes:FindFirstChild("Elevators")
+    if not elevators or not elevators:IsA("RemoteFunction") then
+        return false, "Remotes.Elevators is missing"
+    end
+
+    if type(macro.map) ~= "string"
+        or macro.map == ""
+        or macro.map == "Unknown"
+    then
+        return false, "macro has no valid map name"
+    end
+
+    local deadline = os.clock() + 35
+    local lastError = "no free elevator accepted OpenRoom"
+
+    while session.alive and os.clock() < deadline do
+        local rooms = session.auto.collectElevatorRooms()
+
+        if #rooms == 0 then
+            lastError = "no room-system elevators were found"
+            status("waiting for elevator rooms")
+            task.wait(0.5)
+        else
+            for index, room in ipairs(rooms) do
+                if not session.alive then
+                    return false, "stopped"
+                end
+
+                local owner = room:FindFirstChild("RoomOwner")
+                local roomOpen = room:FindFirstChild("RoomOpen")
+                local ownerText = owner and tostring(owner.Value) or ""
+
+                local usable = ownerText == player.Name
+                    or (
+                        ownerText == ""
+                        and (not roomOpen or roomOpen.Value == false)
+                    )
+
+                if usable then
+                    status(
+                        string.format(
+                            "elevator %d/%d | entering",
+                            index,
+                            #rooms
+                        )
+                    )
+
+                    local moved, moveError =
+                        session.auto.moveIntoElevator(room)
+
+                    if moved then
+                        local currentMap = room:FindFirstChild("CurrentMap")
+                        local limit = room:FindFirstChild("Limit")
+                        local entry = room:FindFirstChild("RoomEntryMode")
+                        local mapMode = room:FindFirstChild("MapMode")
+
+                        pcall(function()
+                            currentMap.Value = macro.map
+                        end)
+                        pcall(function()
+                            limit.Value = 1
+                        end)
+                        pcall(function()
+                            entry.Value = "FriendsOnly"
+                        end)
+                        pcall(function()
+                            mapMode.Value = "Classic"
+                        end)
+
+                        local payload = {
+                            Gamemode = "Classic",
+                            CurrentMap = macro.map,
+                            Limit = 1,
+                            RoomEntryMode = "FriendsOnly",
+                            MapMode = "Classic",
+                            MapModifiers = {},
+                        }
+
+                        status(
+                            "opening "
+                                .. macro.map
+                                .. " | FriendsOnly | Limit 1"
+                        )
+
+                        local callOk, opened = pcall(function()
+                            return elevators:InvokeServer(
+                                room,
+                                "OpenRoom",
+                                payload
+                            )
+                        end)
+
+                        if callOk and opened == true then
+                            local confirmed = false
+                            local confirmStarted = os.clock()
+
+                            while session.alive
+                                and os.clock() - confirmStarted < 3
+                            do
+                                local replicatedOwner =
+                                    owner and tostring(owner.Value) or ""
+                                local replicatedMap =

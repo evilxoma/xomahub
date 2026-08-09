@@ -1,218 +1,3 @@
-    end
-    for _, object in ipairs(playerGui:GetDescendants()) do
-        if object.Name == "CTDIG_EnemyPredict" or object.Name == "CTDIG_DPS" then
-            object:Destroy()
-        end
-    end
-end)
-
--- Rebind when match containers are recreated.
-connect(game.Workspace.ChildAdded, function(child)
-    if child.Name == "Map" or child.Name == "Towers" then
-        task.defer(session.bindCombatSources)
-    end
-end)
-
-connect(game.Workspace.ChildRemoved, function(child)
-    if child == session.combatEnemyFolder
-        or child == session.combatTowerFolder
-        or child.Name == "Map"
-        or child.Name == "Towers"
-    then
-        task.defer(session.bindCombatSources)
-    end
-end)
-
--- Heartbeat is used instead of task.spawn for combat instance work. This avoids
--- executor thread-capability loss seen in the user's runtime.
-session.lastDpsHeartbeat = 0
-session.lastKillHeartbeat = 0
-session.lastMaintenanceHeartbeat = 0
-
-connect(game:GetService("RunService").Heartbeat, function()
-    if not session.alive then
-        return
-    end
-
-    local now = os.clock()
-
-    if now - session.lastDpsHeartbeat >= 0.2 then
-        session.lastDpsHeartbeat = now
-        local dpsOk, dpsError = xpcall(updateDpsVisuals, tracebackError)
-        if not dpsOk then
-            combatDiagDps = session.combatBuild .. " | DPS ERROR: " .. tostring(dpsError)
-            refreshCombatDiag()
-            if now - lastDpsVisualErrorAt >= 5 then
-                lastDpsVisualErrorAt = now
-                warn("[CTDIG DPS] " .. tostring(dpsError))
-            end
-        end
-    end
-
-    if now - session.lastKillHeartbeat >= 0.2 then
-        session.lastKillHeartbeat = now
-        local killOk, killError = xpcall(session.visuals.updateKillPreview, tracebackError)
-        if not killOk then
-            combatDiagPredict = session.combatBuild .. " | Predict ERROR: " .. tostring(killError)
-            refreshCombatDiag()
-            if now - lastKillVisualErrorAt >= 5 then
-                lastKillVisualErrorAt = now
-                warn("[CTDIG Kill Preview] " .. tostring(killError))
-            end
-        end
-    end
-
-    if now - session.lastMaintenanceHeartbeat >= 0.2 then
-        session.lastMaintenanceHeartbeat = now
-
-        pcall(session.recorder.handleEndAction)
-
-        if recording and now - lastRecorderRecoveryScan >= 0.7 then
-            lastRecorderRecoveryScan = now
-            pcall(function()
-                session.recorder.bindGameSources()
-                session.recorder.ensurePlacementRecorder()
-
-                local towers = getTowers()
-                if towers then
-                    for _, tower in ipairs(towers:GetChildren()) do
-                        if tower:IsA("Model") and isMine(tower) then
-                            bindTower(tower)
-                            if not baselineTowers[tower] and not ids[tower] then
-                                session.recorder.onTowerPlaced(tower)
-                            elseif ids[tower] and session.pendingTowerActions[tower] then
-                                flushTowerActions(tower)
-                            end
-                        end
-                    end
-                end
-            end)
-        end
-
-        if now - lastRangePreviewRefresh >= 0.25 then
-            lastRangePreviewRefresh = now
-            pcall(session.visuals.refreshRangePreview)
-        end
-    end
-end)
-
-function session.auto.runRecordedMacro()
-    if not CTDIG_BUILD_AUTORUN or not session.alive then
-        return
-    end
-
-    local macro, macroError = loadMacro()
-    if not macro then
-        setReplayStatus("AutoExecute error: " .. tostring(macroError))
-        notify("AutoExecute error", macroError, 6)
-        return
-    end
-
-    local started = os.clock()
-    while session.alive and os.clock() - started < 30 do
-        local lobbyContext = Workspace:FindFirstChild("Elevators") ~= nil
-            and Workspace:FindFirstChild("Towers") == nil
-        local map = Workspace:FindFirstChild("Map")
-        local matchContext = Workspace:FindFirstChild("Towers") ~= nil
-            and map ~= nil
-            and map:FindFirstChild("Configuration") ~= nil
-
-        if lobbyContext then
-            setRecorderState("idle")
-            setReplayStatus("Lobby | checking deck")
-            local deckOk, deckError = session.auto.ensureMacroDeckInLobby(macro)
-            if not deckOk then
-                setReplayStatus("Lobby deck error: " .. tostring(deckError))
-                notify("AutoExecute deck error", deckError, 8)
-                return
-            end
-
-            setReplayStatus("Lobby | deck OK | finding elevator")
-            local roomOk, roomError = session.auto.openMacroMapFromLobby(macro)
-            if not roomOk then
-                setReplayStatus("Lobby error: " .. tostring(roomError))
-                notify("AutoExecute lobby error", roomError, 8)
-            end
-            return
-        elseif matchContext then
-            setReplayStatus("Match detected | waiting map data")
-            local mapStarted = os.clock()
-            while session.alive and os.clock() - mapStarted < 20 do
-                if getMapName() ~= "Unknown" and player:FindFirstChild("PlayerData") then
-                    break
-                end
-                task.wait(0.1)
-            end
-
-            if not session.sourceBound then
-                session.sourceBound, session.sourceError = session.recorder.bindGameSources()
-            end
-            if not session.sourceBound then
-                setReplayStatus("Match bind error: " .. tostring(session.sourceError))
-                notify("AutoExecute error", session.sourceError or "match sources unavailable", 7)
-                return
-            end
-
-            task.wait(0.25)
-            local ok, replayError = xpcall(session.recorder.replayMacro, tracebackError)
-            if not ok and session.alive then
-                replaying = false
-                replayTaskRunning = false
-                setRecorderState("replay_stopped")
-                setReplayStatus("AutoExecute runtime error")
-                notify("AutoExecute replay error", tostring(replayError), 8)
-            end
-            return
-        end
-
-        setReplayStatus("AutoExecute | waiting for lobby/match")
-        task.wait(0.25)
-    end
-
-    if session.alive then
-        setReplayStatus("AutoExecute timeout: lobby/match not detected")
-    end
-end
-
-local lobbyContextAtStartup = Workspace:FindFirstChild("Elevators") ~= nil
-    and Workspace:FindFirstChild("Towers") == nil
-
-if lobbyContextAtStartup then
-    session.sourceBound = false
-    session.sourceError = nil
-    setRecorderState("idle")
-    setReplayStatus(CTDIG_BUILD_AUTORUN and "AutoExecute lobby starting" or "Lobby detected")
-else
-    session.sourceBound, session.sourceError = session.recorder.bindGameSources()
-    if session.sourceBound then
-        setRecorderState("idle")
-        setReplayStatus("idle")
-    else
-        setRecorderState("error")
-        debugLog(session.sourceError)
-        notify("CTDIG error", session.sourceError, 6)
-    end
-end
-
-if session.saveManager then
-    -- Load only after all CTDIG toggle callbacks have been registered, so a
-    -- saved Auto Retry/Auto Skip/etc. immediately applies its real behavior.
-    task.defer(function()
-        if session.alive then
-            local ok, err = pcall(function()
-                session.saveManager:LoadAutoloadConfig()
-            end)
-            if not ok then
-                warn("[CTDIG] Autoload config failed: " .. tostring(err))
-            end
-        end
-    end)
-end
-
-if CTDIG_BUILD_AUTORUN then
-    task.spawn(session.auto.runRecordedMacro)
-end
-
 -- XOMA strategy API.
 -- Recorder-generated syntax stays unchanged:
 -- local XOMA = loadstring(game:HttpGet(RAW_URL))()
@@ -229,6 +14,22 @@ session.XOMA = {
     },
     _nextId = 0,
 }
+
+local function freshXomaMacro()
+    return {
+        version = 1,
+        map = "Unknown",
+        deck = {},
+        config = {},
+        actions = {},
+    }
+end
+
+function session.XOMA:_resetStrategy()
+    self._macro = freshXomaMacro()
+    self._nextId = 0
+    return self
+end
 
 function session.XOMA:Map(name)
     self._macro.map = tostring(name or "Unknown")
@@ -335,6 +136,19 @@ end
 
 function session.XOMA:Run()
     local macro = self._macro
+
+    if type(macro) ~= "table" or type(macro.actions) ~= "table" then
+        error("XOMA:Run() has no valid strategy", 2)
+    end
+    if #macro.actions == 0 then
+        error("XOMA:Run() strategy has no actions", 2)
+    end
+
+    -- Detach the strategy immediately. This keeps one strategy execution from
+    -- contaminating the next Replay in the same hub session while the captured
+    -- macro table remains intact for the active run.
+    self:_resetStrategy()
+
     local lobbyContext = Workspace:FindFirstChild("Elevators") ~= nil
         and Workspace:FindFirstChild("Towers") == nil
 

@@ -1,0 +1,501 @@
+        fields[#fields + 1] = {
+            name = "⭐ Session EXP",
+            value = session.formatWebhookNumber(summary.exp)
+                .. "\n≈ "
+                .. session.formatWebhookNumber(summary.expPerHour)
+                .. "/h",
+            inline = true,
+        }
+        fields[#fields + 1] = {
+            name = "⏱ Session Runtime",
+            value = session.formatWebhookDuration(summary.runtime)
+                .. "\nAvg run: "
+                .. session.formatWebhookDuration(summary.avgRunSeconds),
+            inline = true,
+        }
+    end
+
+    if not isTest
+        and Toggles.CTDIGWebhookRewards
+        and Toggles.CTDIGWebhookRewards.Value == true
+    then
+        fields[#fields + 1] = {
+            name = "Other Rewards",
+            value = session.getWebhookRewards(),
+            inline = false,
+        }
+    end
+
+    local mention = Options.CTDIGWebhookMention
+        and tostring(Options.CTDIGWebhookMention.Value or "") or ""
+    mention = mention:match("(%d+)") or ""
+
+    local payload = {
+        username = "CTDIG",
+        content = mention ~= "" and ("<@" .. mention .. ">") or nil,
+        allowed_mentions = {
+            parse = {},
+            users = mention ~= "" and { mention } or {},
+        },
+        embeds = {
+            {
+                title = title,
+                color = color,
+                fields = fields,
+                footer = {
+                    text = "CTDIG • " .. tostring(session.replayBuild or "Webhook"),
+                },
+                timestamp = os.date("!%Y-%m-%dT%H:%M:%SZ"),
+            },
+        },
+    }
+
+    local okEncode, body = pcall(function()
+        return game:GetService("HttpService"):JSONEncode(payload)
+    end)
+
+    if not okEncode then
+        session.webhook.busy = false
+        session.setWebhookStatus("Webhook: JSON error")
+        return false, tostring(body)
+    end
+
+    local okRequest, response = pcall(function()
+        return requestFn({
+            Url = url,
+            Method = "POST",
+            Headers = {
+                ["Content-Type"] = "application/json",
+            },
+            Body = body,
+        })
+    end)
+
+    session.webhook.busy = false
+
+    if not okRequest then
+        session.setWebhookStatus("Webhook: request error")
+        return false, tostring(response)
+    end
+
+    local statusCode
+    if type(response) == "table" then
+        statusCode = tonumber(response.StatusCode or response.Status or response.status_code)
+        if response.Success == false then
+            session.setWebhookStatus("Webhook: HTTP " .. tostring(statusCode or "failed"))
+            return false, "request returned failure"
+        end
+    end
+
+    if statusCode and (statusCode < 200 or statusCode >= 300) then
+        session.setWebhookStatus("Webhook: HTTP " .. tostring(statusCode))
+        return false, "HTTP " .. tostring(statusCode)
+    end
+
+    session.setWebhookStatus(
+        isTest
+            and "Webhook: test sent"
+            or ("Webhook: " .. cleanResult .. " sent")
+    )
+
+    pcall(function()
+        notify(
+            "Webhook",
+            isTest and "Test message sent" or (cleanResult .. " sent"),
+            3
+        )
+    end)
+
+    return true
+end
+
+function session.observeWebhookResult(endFrame, result)
+    local state = session.webhook
+    local enabled = Toggles.CTDIGWebhookEnabled
+        and Toggles.CTDIGWebhookEnabled.Value == true
+
+    if not endFrame or (result ~= "Triumph" and result ~= "Defeat") then
+        if state.endActive then
+            state.endActive = false
+            state.endResult = nil
+            state.endSeenAt = 0
+            state.sent = false
+            state.busy = false
+            state.attempts = 0
+            state.nextAttempt = 0
+            state.accounted = false
+        end
+
+        if enabled then
+            session.setWebhookStatus("Webhook: waiting for result")
+        else
+            session.setWebhookStatus("Webhook: disabled")
+        end
+        return
+    end
+
+    if not state.accounted then
+        session.accountWebhookRun(result)
+        state.accounted = true
+    end
+
+    if not enabled then
+        session.setWebhookStatus("Webhook: disabled")
+        return
+    end
+
+    local wantsResult =
+        (result == "Triumph"
+            and Toggles.CTDIGWebhookVictory
+            and Toggles.CTDIGWebhookVictory.Value == true)
+        or
+        (result == "Defeat"
+            and Toggles.CTDIGWebhookDefeat
+            and Toggles.CTDIGWebhookDefeat.Value == true)
+
+    if not wantsResult then
+        session.setWebhookStatus("Webhook: " .. result .. " ignored")
+        return
+    end
+
+    local now = os.clock()
+
+    if not state.endActive or state.endResult ~= result then
+        state.endActive = true
+        state.endResult = result
+        state.endSeenAt = now
+        state.sent = false
+        state.busy = false
+        state.attempts = 0
+        state.nextAttempt = now + 0.8
+    end
+
+    if state.sent or state.busy or now < (state.nextAttempt or 0) then
+        return
+    end
+
+    state.attempts = (state.attempts or 0) + 1
+
+    local ok, err = session.sendWebhook(result, false)
+    if ok then
+        state.sent = true
+        return
+    end
+
+    if state.attempts >= 3 then
+        state.sent = true
+        session.setWebhookStatus(
+            "Webhook: failed after 3 attempts | " .. tostring(err)
+        )
+        return
+    end
+
+    state.nextAttempt = os.clock() + 2
+    session.setWebhookStatus(
+        "Webhook: retry " .. tostring(state.attempts + 1) .. "/3"
+    )
+end
+
+function session.getDeckSnapshot()
+    local data = player:FindFirstChild("PlayerData")
+    local loadout = data and data:FindFirstChild("Loadout")
+    if not loadout then
+        return {}
+    end
+
+    local slots = {}
+    for _, child in ipairs(loadout:GetChildren()) do
+        if child:IsA("ValueBase") then
+            local index = tonumber(child.Name:match("^Tower(%d+)$"))
+            if index then
+                slots[#slots + 1] = { index = index, value = tostring(child.Value) }
+            end
+        end
+    end
+
+    table.sort(slots, function(a, b)
+        return a.index < b.index
+    end)
+
+    local deck = {}
+    for _, slot in ipairs(slots) do
+        deck[#deck + 1] = slot.value
+    end
+    return deck
+end
+
+function session.compactDeckText(deck)
+    local out = {}
+    for _, name in ipairs(deck or {}) do
+        if name and name ~= "" and name ~= "None" then
+            out[#out + 1] = tostring(name)
+        end
+    end
+    return #out > 0 and table.concat(out, ", ") or "empty"
+end
+
+local function getTowers()
+    return Workspace:FindFirstChild("Towers")
+end
+
+local function getGameVals()
+    return Workspace:FindFirstChild("GameVals")
+end
+
+local function getNativeAutoSkipSetting()
+    local data = player:FindFirstChild("PlayerData")
+    local settings = data and data:FindFirstChild("Settings")
+    return settings and settings:FindFirstChild("AutoSkip")
+end
+
+local function getSettingsRemote()
+    local buttons = playerGui:FindFirstChild("Buttons")
+    local settingsFrame = buttons and buttons:FindFirstChild("SettingsFrame")
+    local mainFrame = settingsFrame and settingsFrame:FindFirstChild("MainFrame")
+    local controller = mainFrame and mainFrame:FindFirstChild("LocalScript")
+    local remote = controller and controller:FindFirstChild("RemoteEvent")
+
+    if remote and remote:IsA("RemoteEvent") then
+        return remote
+    end
+
+    if mainFrame then
+        for _, object in ipairs(mainFrame:GetDescendants()) do
+            if object:IsA("RemoteEvent") and object.Parent and object.Parent:IsA("LocalScript") then
+                return object
+            end
+        end
+    end
+end
+
+local function setNativeAutoSkip(enabled)
+    enabled = enabled == true
+    local setting = getNativeAutoSkipSetting()
+    if not setting then
+        return false, "PlayerData.Settings.AutoSkip is missing"
+    end
+
+    if setting.Value == enabled then
+        return true
+    end
+
+    local remote = getSettingsRemote()
+    if not remote then
+        return false, "native settings RemoteEvent is missing"
+    end
+
+    local ok, err = pcall(function()
+        remote:FireServer("AutoSkip")
+    end)
+    if not ok then
+        return false, tostring(err)
+    end
+
+    local started = os.clock()
+    while session.alive and os.clock() - started < 2 do
+        if setting.Value == enabled then
+            return true
+        end
+        task.wait(0.05)
+    end
+
+    return setting.Value == enabled, "server did not change AutoSkip"
+end
+
+local function getDetects()
+    local service = Workspace:FindFirstChild("WorkspaceScriptService")
+    local storage = service and service:FindFirstChild("DetectStorage")
+    return storage and storage:FindFirstChild("EverythingDetects")
+end
+
+local function getOwner(tower)
+    local config = tower and tower:FindFirstChild("Configuration")
+    local owner = config and config:FindFirstChild("Owner")
+
+    if owner then
+        if typeof(owner.Value) == "Instance" then
+            return owner.Value.Name
+        end
+        return tostring(owner.Value)
+    end
+
+    local attribute = tower and tower:GetAttribute("Owner")
+    return attribute and tostring(attribute) or nil
+end
+
+local function isMine(tower)
+    return tower and tower.Parent and getOwner(tower) == player.Name
+end
+
+local function getLevel(tower)
+    local config = tower and tower:FindFirstChild("Configuration")
+    local level = config and config:FindFirstChild("Level")
+    return level and tonumber(level.Value) or 0
+end
+
+local function getTarget(tower)
+    if not tower then
+        return nil
+    end
+
+    -- game2 keeps OtherConfig inside Configuration, not at tower root.
+    -- Keep the root fallback only for compatibility with unusual/special towers.
+    local config = tower:FindFirstChild("Configuration")
+    local other = config and config:FindFirstChild("OtherConfig")
+        or tower:FindFirstChild("OtherConfig")
+    local targets = other and other:FindFirstChild("Targets")
+    return targets and tostring(targets.Value) or nil
+end
+
+local function getRoot(object)
+    if not object then
+        return nil
+    end
+
+    if object:IsA("BasePart") then
+        return object
+    end
+
+    -- Runtime tower/enemy containers are not guaranteed to be Models.
+    -- Some game objects are Folders that directly own HumanoidRootPart and
+    -- replicated Configuration/health values.  Never discard them by class.
+    if object:IsA("Model") and object.PrimaryPart then
+        return object.PrimaryPart
+    end
+
+    local named = object:FindFirstChild("HumanoidRootPart", true)
+        or object:FindFirstChild("RootPart", true)
+        or object:FindFirstChild("Torso", true)
+    if named and named:IsA("BasePart") then
+        return named
+    end
+
+    return object:FindFirstChildWhichIsA("BasePart", true)
+end
+
+local function vec(v)
+    return {
+        x = math.round(v.X * 1000) / 1000,
+        y = math.round(v.Y * 1000) / 1000,
+        z = math.round(v.Z * 1000) / 1000,
+    }
+end
+
+local function toVector3(v)
+    if type(v) ~= "table" then
+        return Vector3.zero
+    end
+    return Vector3.new(tonumber(v.x) or 0, tonumber(v.y) or 0, tonumber(v.z) or 0)
+end
+
+local function pathUnder(root, object)
+    if not root or not object or object == root or not object:IsDescendantOf(root) then
+        return nil
+    end
+
+    local path = {}
+    local current = object
+
+    while current and current ~= root do
+        local parent = current.Parent
+        if not parent then
+            return nil
+        end
+
+        local index = 0
+        for _, sibling in ipairs(parent:GetChildren()) do
+            if sibling.Name == current.Name and sibling.ClassName == current.ClassName then
+                index = index + 1
+                if sibling == current then
+                    break
+                end
+            end
+        end
+
+        table.insert(path, 1, {
+            name = current.Name,
+            class = current.ClassName,
+            index = index,
+        })
+        current = parent
+    end
+
+    return path
+end
+
+local function resolvePath(root, path)
+    if not root or type(path) ~= "table" then
+        return nil
+    end
+
+    local current = root
+    for _, step in ipairs(path) do
+        if type(step) == "string" then
+            current = current and current:FindFirstChild(step)
+        elseif type(step) == "table" and current then
+            local wantedIndex = tonumber(step.index) or 1
+            local foundIndex = 0
+            local found
+
+            for _, child in ipairs(current:GetChildren()) do
+                if child.Name == step.name and (not step.class or child.ClassName == step.class) then
+                    foundIndex = foundIndex + 1
+                    if foundIndex == wantedIndex then
+                        found = child
+                        break
+                    end
+                end
+            end
+
+            current = found
+        else
+            current = nil
+        end
+
+        if not current then
+            return nil
+        end
+    end
+
+    return current
+end
+
+local function sourceFor(object)
+    if typeof(object) ~= "Instance" then
+        return nil
+    end
+
+    if object:IsDescendantOf(playerGui) then
+        return { root = "PlayerGui", path = pathUnder(playerGui, object) }
+    end
+
+    if object:IsDescendantOf(player) then
+        return { root = "Player", path = pathUnder(player, object) }
+    end
+
+    if object:IsDescendantOf(ReplicatedStorage) then
+        return { root = "ReplicatedStorage", path = pathUnder(ReplicatedStorage, object) }
+    end
+end
+
+local function resolveSource(source)
+    if type(source) ~= "table" then
+        return nil
+    end
+
+    local root
+    if source.root == "PlayerGui" then
+        root = playerGui
+    elseif source.root == "Player" then
+        root = player
+    elseif source.root == "ReplicatedStorage" then
+        root = ReplicatedStorage
+    end
+
+    return resolvePath(root, source.path)
+end
+
+local function getCTDModule()
+    if ctdModule ~= nil then
+        return ctdModule or nil
+    end

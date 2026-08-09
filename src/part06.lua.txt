@@ -1,0 +1,473 @@
+            Options.CTDIGKillInfo:SetText(text)
+        end
+    end)
+end
+
+local function removeKillHighlight(enemy)
+    local highlight = killHighlights[enemy]
+    if highlight then
+        pcall(function()
+            highlight:Destroy()
+        end)
+        killHighlights[enemy] = nil
+    end
+
+    local label = killLabels[enemy]
+    if label then
+        pcall(function()
+            label:Destroy()
+        end)
+        killLabels[enemy] = nil
+    end
+end
+
+local function clearKillHighlights()
+    local enemies = {}
+    for enemy in pairs(killHighlights) do
+        enemies[#enemies + 1] = enemy
+    end
+    for enemy in pairs(killLabels) do
+        if not killHighlights[enemy] then
+            enemies[#enemies + 1] = enemy
+        end
+    end
+    for _, enemy in ipairs(enemies) do
+        removeKillHighlight(enemy)
+    end
+    table.clear(enemyMotion)
+end
+
+local function ensureEnemyPredictLabel(enemy)
+    local root = getRoot(enemy)
+    if not root then
+        return nil
+    end
+
+    local gui = killLabels[enemy]
+    if gui and gui.Parent and gui.Adornee == root then
+        return gui
+    end
+
+    if gui then
+        pcall(function()
+            gui:Destroy()
+        end)
+    end
+
+    gui = Instance.new("BillboardGui")
+    gui.Name = "CTDIG_EnemyPredict"
+    gui.Adornee = root
+    gui.AlwaysOnTop = true
+    gui.Enabled = true
+    gui.LightInfluence = 0
+    gui.MaxDistance = 650
+    gui.Size = UDim2.fromOffset(168, 34)
+
+    local offsetY = 3.2
+    if enemy:IsA("Model") then
+        local ok, boxCFrame, boxSize = pcall(enemy.GetBoundingBox, enemy)
+        if ok and typeof(boxCFrame) == "CFrame" and typeof(boxSize) == "Vector3" then
+            offsetY = math.max(
+                2.8,
+                boxCFrame.Position.Y + boxSize.Y * 0.5 - root.Position.Y + 0.65
+            )
+        end
+    end
+    gui.StudsOffsetWorldSpace = Vector3.new(0, offsetY, 0)
+    gui.Parent = playerGui or root
+
+    local back = Instance.new("Frame")
+    back.Name = "Back"
+    back.BorderSizePixel = 0
+    back.BackgroundColor3 = Color3.fromRGB(12, 13, 16)
+    back.BackgroundTransparency = 0.12
+    back.Size = UDim2.fromScale(1, 1)
+    back.Parent = gui
+
+    local corner = Instance.new("UICorner")
+    corner.CornerRadius = UDim.new(0, 6)
+    corner.Parent = back
+
+    local gradient = Instance.new("UIGradient")
+    gradient.Name = "DarkGradient"
+    gradient.Color = ColorSequence.new({
+        ColorSequenceKeypoint.new(0, Color3.fromRGB(32, 34, 40)),
+        ColorSequenceKeypoint.new(0.55, Color3.fromRGB(15, 16, 20)),
+        ColorSequenceKeypoint.new(1, Color3.fromRGB(4, 5, 7)),
+    })
+    gradient.Transparency = NumberSequence.new({
+        NumberSequenceKeypoint.new(0, 0.08),
+        NumberSequenceKeypoint.new(0.5, 0.18),
+        NumberSequenceKeypoint.new(1, 0.34),
+    })
+    gradient.Rotation = 90
+    gradient.Parent = back
+
+    local label = Instance.new("TextLabel")
+    label.Name = "Text"
+    label.BackgroundTransparency = 1
+    label.BorderSizePixel = 0
+    label.Size = UDim2.new(1, -10, 1, -4)
+    label.Position = UDim2.fromOffset(5, 2)
+    label.Font = Enum.Font.GothamBold
+    label.TextColor3 = Color3.fromRGB(255, 255, 255)
+    label.TextSize = 11
+    label.TextWrapped = false
+    label.TextXAlignment = Enum.TextXAlignment.Center
+    label.TextYAlignment = Enum.TextYAlignment.Center
+    label.Text = "HP —  •  DPS —"
+    label.Parent = back
+
+    local textStroke = Instance.new("UIStroke")
+    textStroke.Name = "TextStroke"
+    textStroke.ApplyStrokeMode = Enum.ApplyStrokeMode.Contextual
+    textStroke.Color = Color3.fromRGB(0, 0, 0)
+    textStroke.Thickness = 1.35
+    textStroke.Transparency = 0.05
+    textStroke.Parent = label
+
+    killLabels[enemy] = gui
+    return gui
+end
+
+local function setEnemyKillColor(enemy, lethal, currentHealth, predictedRemaining, potentialDps)
+    local highlight = killHighlights[enemy]
+    if not highlight or not highlight.Parent then
+        local visualAdornee = enemy
+        if not (enemy:IsA("Model") or enemy:IsA("BasePart")) then
+            visualAdornee = enemy:FindFirstChildWhichIsA("Model", true) or getRoot(enemy) or enemy
+        end
+
+        highlight = Instance.new("Highlight")
+        highlight.Name = "CTDIG_KillPreview"
+        highlight.Adornee = visualAdornee
+        highlight.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
+        highlight.Parent = visualAdornee
+        killHighlights[enemy] = highlight
+    end
+
+    if lethal then
+        highlight.FillColor = Color3.fromRGB(50, 220, 112)
+        highlight.OutlineColor = Color3.fromRGB(125, 255, 170)
+        highlight.FillTransparency = 0.72
+        highlight.OutlineTransparency = 0.06
+    else
+        highlight.FillColor = Color3.fromRGB(236, 58, 66)
+        highlight.OutlineColor = Color3.fromRGB(255, 112, 118)
+        highlight.FillTransparency = 0.54
+        highlight.OutlineTransparency = 0.02
+    end
+
+    local gui = ensureEnemyPredictLabel(enemy)
+    local back = gui and gui:FindFirstChild("Back")
+    local label = back and back:FindFirstChild("Text")
+    if label and label:IsA("TextLabel") then
+        local hp = math.max(0, tonumber(currentHealth) or 0)
+        local remaining = math.max(0, tonumber(predictedRemaining) or hp)
+        label.TextColor3 = Color3.fromRGB(255, 255, 255)
+        label.Text = string.format(
+            "HP %s  •  LEFT %s  •  %s",
+            formatCompactNumber(hp),
+            formatCompactNumber(remaining),
+            lethal and "SAFE" or "LEAK"
+        )
+    end
+end
+
+local function horizontal(vector)
+    return Vector3.new(vector.X, 0, vector.Z)
+end
+
+local function sampleEnemyVelocity(enemy, now)
+    local root = getRoot(enemy)
+    if not root then
+        return Vector3.zero
+    end
+
+    local position = root.Position
+    local state = enemyMotion[enemy]
+    if not state then
+        state = {
+            position = position,
+            time = now,
+            velocity = horizontal(root.AssemblyLinearVelocity),
+        }
+        enemyMotion[enemy] = state
+    else
+        local dt = now - (state.time or now)
+        if dt >= 0.08 then
+            local measured = horizontal(position - state.position) / dt
+            if measured.Magnitude > 0.04 then
+                if state.velocity and state.velocity.Magnitude > 0.04 then
+                    state.velocity = state.velocity:Lerp(measured, 0.55)
+                else
+                    state.velocity = measured
+                end
+            end
+            state.position = position
+            state.time = now
+        end
+    end
+
+    local velocity = state.velocity or Vector3.zero
+    if velocity.Magnitude <= 0.04 then
+        local assembly = horizontal(root.AssemblyLinearVelocity)
+        if assembly.Magnitude > 0.04 then
+            velocity = assembly
+        else
+            local baseSpeed = readNumberValue(enemy, "BaseSpeed") or 0
+            local look = horizontal(root.CFrame.LookVector)
+            if baseSpeed > 0 and look.Magnitude > 0.01 then
+                velocity = look.Unit * baseSpeed
+            end
+        end
+    end
+
+    return velocity
+end
+
+local function coverageInterval(enemyPosition, velocity, towerPosition, range, horizon)
+    local relative = horizontal(enemyPosition - towerPosition)
+    local v = horizontal(velocity)
+    local radius = math.max(0, range)
+    local a = v:Dot(v)
+    local c = relative:Dot(relative) - radius * radius
+
+    if a < 0.0025 then
+        if c <= 0 then
+            return 0, horizon
+        end
+        return nil
+    end
+
+    local b = 2 * relative:Dot(v)
+    local discriminant = b * b - 4 * a * c
+    if discriminant < 0 then
+        if c <= 0 then
+            return 0, horizon
+        end
+        return nil
+    end
+
+    local rootDisc = math.sqrt(discriminant)
+    local t1 = (-b - rootDisc) / (2 * a)
+    local t2 = (-b + rootDisc) / (2 * a)
+    if t1 > t2 then
+        t1, t2 = t2, t1
+    end
+
+    local enter = math.max(0, t1)
+    local leave = math.min(horizon, t2)
+    if c <= 0 then
+        enter = 0
+    end
+
+    if leave < 0 or enter > horizon or leave < enter then
+        return nil
+    end
+    return enter, leave
+end
+
+local function pathNodePosition(object, reverse)
+    if typeof(object) ~= "Instance" then
+        return nil
+    end
+    if object:IsA("Attachment") then
+        return object.WorldPosition
+    end
+    if object:IsA("BasePart") then
+        local node = object:FindFirstChild(reverse and "ReverseNode" or "Node")
+            or object:FindFirstChild("Node")
+        if node and node:IsA("Attachment") then
+            return node.WorldPosition
+        end
+        return object.Position
+    end
+    local root = getRoot(object)
+    return root and root.Position or nil
+end
+
+local function enemyPathPoints(enemy, position, velocity)
+    local config = enemy:FindFirstChild("Configuration")
+    local currentValue = config and config:FindFirstChild("CurrentPathObject")
+    local maximumValue = config and config:FindFirstChild("MaximumPathObject")
+    local currentObject = currentValue and currentValue.Value
+    local maximumObject = maximumValue and maximumValue.Value
+    local truePathValue = enemy:FindFirstChild("TruePath")
+    local container = truePathValue and truePathValue:IsA("ObjectValue") and truePathValue.Value
+        or (typeof(currentObject) == "Instance" and currentObject.Parent)
+    local currentIndex = math.floor(readNumberValue(config, "CurrentPath") or 0)
+    local maximumIndex = math.floor(readNumberValue(config, "MaximumPath") or 0)
+
+    if typeof(currentObject) == "Instance" and tonumber(currentObject.Name) then
+        currentIndex = math.floor(tonumber(currentObject.Name))
+    end
+    if typeof(maximumObject) == "Instance" and tonumber(maximumObject.Name) then
+        maximumIndex = math.floor(tonumber(maximumObject.Name))
+    end
+    local reverse = maximumIndex > 0 and maximumIndex < currentIndex
+    local step = reverse and -1 or 1
+
+    local points = {}
+    local lastObject
+    local function append(object)
+        local point = pathNodePosition(object, reverse)
+        if not point then
+            return
+        end
+        local delta = horizontal(point - position)
+        if #points == 0 and velocity.Magnitude > 0.04 and delta.Magnitude > 0.05
+            and delta:Dot(velocity) < -0.02 then
+            return
+        end
+        if #points == 0 or horizontal(point - points[#points]).Magnitude > 0.03 then
+            points[#points + 1] = point
+            lastObject = object
+        end
+    end
+
+    append(currentObject)
+    if typeof(container) == "Instance" then
+        local stopIndex = maximumIndex > 0 and maximumIndex or (currentIndex + step * 64)
+        stopIndex = reverse and math.max(stopIndex, currentIndex - 128)
+            or math.min(stopIndex, currentIndex + 128)
+        for index = currentIndex + step, stopIndex, step do
+            append(container:FindFirstChild(tostring(index)))
+        end
+    end
+    if typeof(maximumObject) == "Instance" and maximumObject ~= lastObject then
+        append(maximumObject)
+    end
+
+    local complete = typeof(maximumObject) == "Instance" and lastObject == maximumObject
+        or maximumIndex > 0 and lastObject and tonumber(lastObject.Name) == maximumIndex
+    return points, complete == true
+end
+
+local function buildEnemyTrajectory(enemy, position, velocity, horizon)
+    local points, complete = enemyPathPoints(enemy, position, velocity)
+    local config = enemy:FindFirstChild("Configuration")
+    local speed = velocity.Magnitude
+    if not speed or speed <= 0.04 then
+        speed = readNumberValue(config, "Speed")
+            or readNumberValue(enemy, "BaseSpeed")
+            or 0.05
+    end
+    speed = math.max(0.05, tonumber(speed) or 0.05)
+
+    local segments = {}
+    local from = position
+    local time = 0
+    for _, point in ipairs(points) do
+        local delta = horizontal(point - from)
+        local distance = delta.Magnitude
+        if distance > 0.03 then
+            local duration = distance / speed
+            local finish = math.min(horizon, time + duration)
+            local ratio = math.clamp((finish - time) / duration, 0, 1)
+            local to = from:Lerp(point, ratio)
+            segments[#segments + 1] = {
+                from = from,
+                velocity = delta.Unit * speed,
+                start = time,
+                finish = finish,
+            }
+            from = to
+            time = finish
+            if finish >= horizon then
+                complete = false
+                break
+            end
+        end
+    end
+
+    if #segments == 0 and not complete then
+        local enemyRoot = getRoot(enemy)
+        local look = enemyRoot and horizontal(enemyRoot.CFrame.LookVector) or Vector3.zero
+        local direction = velocity.Magnitude > 0.04 and velocity.Unit
+            or (look.Magnitude > 0.01 and look.Unit or Vector3.new(0, 0, -1))
+        segments[1] = {
+            from = position,
+            velocity = direction * speed,
+            start = 0,
+            finish = horizon,
+        }
+        time = horizon
+    elseif time < horizon and not complete then
+        local direction = velocity.Magnitude > 0.04 and velocity.Unit
+            or (#segments > 0 and segments[#segments].velocity.Unit or Vector3.new(0, 0, -1))
+        segments[#segments + 1] = {
+            from = from,
+            velocity = direction * speed,
+            start = time,
+            finish = horizon,
+        }
+        time = horizon
+    end
+
+    return {
+        segments = segments,
+        exitTime = complete and time or horizon,
+        complete = complete == true,
+    }
+end
+
+local function trajectoryCoverage(trajectory, tower)
+    local intervals = {}
+    for _, segment in ipairs(trajectory.segments) do
+        local duration = segment.finish - segment.start
+        if duration > 0 then
+            local enter, leave = coverageInterval(segment.from, segment.velocity, tower.position, tower.range, duration)
+            if enter then
+                enter = enter + segment.start
+                leave = math.min(leave + segment.start, trajectory.exitTime)
+                local previous = intervals[#intervals]
+                if previous and enter <= previous.leave + 0.025 then
+                    previous.leave = math.max(previous.leave, leave)
+                else
+                    intervals[#intervals + 1] = { enter = enter, leave = leave }
+                end
+            end
+        end
+    end
+    return intervals
+end
+
+local function intervalAtOrAfter(intervals, time)
+    for _, interval in ipairs(intervals) do
+        if time >= interval.enter - 1e-4 and time <= interval.leave - 0.015 then
+            return interval, true
+        end
+        if interval.enter > time then
+            return interval, false
+        end
+    end
+end
+
+local function looksLikeRuntimeEnemy(object)
+    if not object or object == Workspace or object == Workspace:FindFirstChild("Map") then
+        return false
+    end
+    local totalLife = object:FindFirstChild("TotalLife")
+    local health2 = object:FindFirstChild("Health2")
+    local humanoidObject = object:FindFirstChild("Humanoid")
+    local config = object:FindFirstChild("Configuration")
+    local hasHealth = totalLife ~= nil or health2 ~= nil or humanoidObject ~= nil
+    if not hasHealth then
+        return false
+    end
+    local enemySignature = object:FindFirstChild("BaseSpeed") ~= nil
+        or object:FindFirstChild("OriginEnemyName") ~= nil
+        or (config and config:FindFirstChild("CurrentPath") ~= nil)
+        or totalLife ~= nil
+    return enemySignature and getRoot(object) ~= nil
+end
+
+session.combatEnemies = setmetatable({}, { __mode = "k" })
+session.combatTowers = setmetatable({}, { __mode = "k" })
+session.combatEnemyFolder = nil
+session.combatTowerFolder = nil
+session.combatEnemySourceConnections = {}
+session.combatTowerSourceConnections = {}
+
+session.bindCombatSources = function()

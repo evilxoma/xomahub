@@ -1,5 +1,5 @@
 -- XOMA / CTDIG bootstrap
--- Build: PASS19B-NATIVE-PLACE-RAYCAST-V29
+-- Build: PASS20-VECTOR3-STRATEGY-V30
 -- Reuses an already-loaded XOMA session so strategy files can be executed
 -- directly by the Player without recursively rebuilding/cleaning the hub.
 
@@ -181,7 +181,7 @@ local XOMA = coreChunk()
 local activeSession = environment.CTDIG_SESSION
 if type(activeSession) == "table" then
     activeSession.dataModel = game
-    activeSession.bootstrapBuild = "PASS19B-NATIVE-PLACE-RAYCAST-V29"
+    activeSession.bootstrapBuild = "PASS20-VECTOR3-STRATEGY-V30"
 end
 
 local autoexecSource = game:HttpGet(
@@ -212,11 +212,11 @@ end
 XOMA = playerChunk() or XOMA
 
 local w0Source = game:HttpGet(
-    "https://raw.githubusercontent.com/evilxoma/xomahub/refs/heads/main/patches/w0_v27.lua"
+    "https://raw.githubusercontent.com/evilxoma/xomahub/refs/heads/main/patches/w0_v30.lua"
 )
 local w0Chunk, w0Error = loadstring(w0Source)
 if not w0Chunk then
-    error("XOMA W0 patch compile failed: " .. tostring(w0Error))
+    error("XOMA V30 patch compile failed: " .. tostring(w0Error))
 end
 XOMA = w0Chunk() or XOMA
 

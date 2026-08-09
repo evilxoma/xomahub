@@ -2,8 +2,17 @@
 -- Build: PASS21-ENDSCREEN-GATE-V31
 
 local environment = typeof(getgenv) == "function" and getgenv() or _G
-local existingSession = environment.CTDIG_SESSION
 
+local function runPatch(url, label)
+    local source = game:HttpGet(url)
+    local chunk, err = loadstring(source)
+    if not chunk then
+        error(label .. " compile failed: " .. tostring(err))
+    end
+    return chunk()
+end
+
+local existingSession = environment.CTDIG_SESSION
 if type(existingSession) == "table"
     and existingSession.alive == true
     and existingSession.dataModel == game
@@ -19,20 +28,16 @@ then
     }
     existingSession.XOMA._nextId = 0
 
-    local patchOk, patchResult = pcall(function()
-        local source = game:HttpGet(
-            "https://raw.githubusercontent.com/evilxoma/xomahub/refs/heads/main/patches/endaction_v31.lua"
-        )
-        local chunk, err = loadstring(source)
-        if not chunk then
-            error(err)
-        end
-        return chunk()
-    end)
-    if not patchOk then
-        warn("[XOMA V31] end-action refresh failed: " .. tostring(patchResult))
-    end
+    runPatch(
+        "https://raw.githubusercontent.com/evilxoma/xomahub/refs/heads/main/patches/w0_v30.lua",
+        "XOMA V30"
+    )
+    runPatch(
+        "https://raw.githubusercontent.com/evilxoma/xomahub/refs/heads/main/patches/endaction_v31.lua",
+        "XOMA V31"
+    )
 
+    existingSession.bootstrapBuild = "PASS21-ENDSCREEN-GATE-V31"
     return existingSession.XOMA
 end
 
@@ -45,9 +50,20 @@ if not chunk then
 end
 local XOMA = chunk()
 
+-- Force the cache-busted patches even if the inner ctdui.lua response was stale.
+runPatch(
+    "https://raw.githubusercontent.com/evilxoma/xomahub/refs/heads/main/patches/w0_v30.lua",
+    "XOMA V30"
+)
+runPatch(
+    "https://raw.githubusercontent.com/evilxoma/xomahub/refs/heads/main/patches/endaction_v31.lua",
+    "XOMA V31"
+)
+
 local session = environment.CTDIG_SESSION
 if type(session) == "table" then
     session.bootstrapBuild = "PASS21-ENDSCREEN-GATE-V31"
 end
 
+print("[XOMA V31] cache-busted bootstrap loaded")
 return XOMA

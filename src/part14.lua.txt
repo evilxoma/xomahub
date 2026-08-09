@@ -33,7 +33,6 @@
         runtime[id] = state
 
         while replaying and session.alive do
-            -- Existing live replacement is always preferred.
             if not state.tower or not state.tower.Parent then
                 state.tower = nil
 
@@ -64,7 +63,6 @@
                 return nil, "stopped"
             end
 
-            -- Rebuild the replacement to the last successfully reached level.
             local targetLevel = tonumber(state.level) or getLevel(state.tower)
             local restoreRestart = false
 
@@ -98,7 +96,6 @@
             end
 
             if restoreRestart then
-                -- Tower died again while rebuilding; place another one.
             elseif state.target and state.tower and state.tower.Parent then
                 local targetOk, targetError = performTarget(state.tower, state.target)
                 if targetOk then
@@ -346,6 +343,11 @@ local function startRecording()
     nextId = 1
     macroMap = getMapName()
     macroDeck = session.getDeckSnapshot()
+    do
+        local difficulty = Workspace:FindFirstChild("Difficulty")
+        local value = difficulty and tostring(difficulty.Value) or "Normal"
+        session.recorderMacroDifficulty = (value ~= "" and value ~= "None") and value or "Normal"
+    end
     placementAttempt = nil
     recentPlacement = nil
     table.clear(session.placementQueue)
@@ -367,8 +369,6 @@ local function startRecording()
         end
     end
 
-    -- Existing towers are only a baseline. Recording starts from this click;
-    -- we do not retroactively serialize towers that were already on the map.
     for _, tower in ipairs(towers:GetChildren()) do
         if isMine(tower) then
             baselineTowers[tower] = true
@@ -377,7 +377,13 @@ local function startRecording()
     end
 
     setRecorderState("recording")
-    notify("Recording started", "Map: " .. macroMap .. " | Deck: " .. session.compactDeckText(macroDeck), 4)
+    notify(
+        "Recording started",
+        "Map: " .. macroMap
+            .. " | Difficulty: " .. tostring(session.recorderMacroDifficulty or "Normal")
+            .. " | Deck: " .. session.compactDeckText(macroDeck),
+        4
+    )
 end
 
 local function stopRecording()
@@ -388,9 +394,14 @@ local function stopRecording()
 
     setRecorderState("saving")
 
-    -- One final authoritative pass before freezing the recorder. This repairs a
-    -- TowerPlaced/Configuration replication race instead of silently saving a
-    -- half-recorded macro.
+    do
+        local difficulty = Workspace:FindFirstChild("Difficulty")
+        local value = difficulty and tostring(difficulty.Value) or ""
+        if value ~= "" and value ~= "None" then
+            session.recorderMacroDifficulty = value
+        end
+    end
+
     local towers = getTowers()
     if towers then
         for _, tower in ipairs(towers:GetChildren()) do
@@ -430,7 +441,6 @@ local function stopRecording()
         task.wait(0.04)
     end
 
-    -- Flush everything whose Place was confirmed during the drain window.
     local unresolved = 0
     for tower, queued in pairs(session.pendingTowerActions) do
         if ids[tower] then

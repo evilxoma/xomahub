@@ -1,0 +1,485 @@
+    end
+
+    local modules = ReplicatedStorage:FindFirstChild("Modules")
+    local moduleScript = modules and modules:FindFirstChild("CTDModule")
+    if not moduleScript then
+        ctdModule = false
+        return nil
+    end
+
+    local ok, module = pcall(require, moduleScript)
+    if not ok then
+        warn("[CTDIG] CTDModule require failed: " .. tostring(module))
+    end
+    ctdModule = ok and module or false
+    return ctdModule or nil
+end
+
+do
+local function readNumberValue(root, name, recursive)
+    if not root then
+        return nil
+    end
+
+    local value = root:FindFirstChild(name, recursive == true)
+    if value and value:IsA("ValueBase") then
+        return tonumber(value.Value)
+    end
+end
+
+local function formatCompactNumber(value)
+    value = tonumber(value) or 0
+    local abs = math.abs(value)
+
+    if abs >= 1000000000 then
+        return string.format("%.1fB", value / 1000000000)
+    elseif abs >= 1000000 then
+        return string.format("%.1fM", value / 1000000)
+    elseif abs >= 1000 then
+        return string.format("%.1fK", value / 1000)
+    elseif abs >= 100 then
+        return string.format("%.0f", value)
+    elseif abs >= 10 then
+        return string.format("%.1f", value)
+    end
+
+    return string.format("%.2f", value)
+end
+
+local function setRangeInfo(text)
+    pcall(function()
+        if rangeInfoLabel and type(rangeInfoLabel.SetText) == "function" then
+            rangeInfoLabel:SetText(text)
+        elseif Options.CTDIGRangeInfo and type(Options.CTDIGRangeInfo.SetText) == "function" then
+            Options.CTDIGRangeInfo:SetText(text)
+        end
+    end)
+end
+
+local function unitLevelRanges(unitName, preview, surface)
+    local units = ReplicatedStorage:FindFirstChild("Units")
+    local unitFolder = units and units:FindFirstChild(unitName)
+    local levels = unitFolder and unitFolder:FindFirstChild("Levels")
+    if not levels then
+        return {}
+    end
+
+    local module = getCTDModule()
+    local entries = {}
+
+    for _, levelFolder in ipairs(levels:GetChildren()) do
+        local level = tonumber(levelFolder.Name)
+        if level ~= nil then
+            local settings = levelFolder:FindFirstChild("Settings")
+            local range = readNumberValue(settings, "Range")
+            local range2 = readNumberValue(settings, "Range2")
+
+            if not range then
+                local objects = levelFolder:FindFirstChild("Object")
+                local object = objects and (objects:FindFirstChild(unitName)
+                    or objects:FindFirstChildWhichIsA("Model")
+                    or objects:FindFirstChildWhichIsA("BasePart"))
+                local config = object and object:FindFirstChild("Configuration")
+                range = readNumberValue(config, "Range") or readNumberValue(object, "Range", true)
+                range2 = range2 or readNumberValue(config, "Range2")
+            end
+
+            if range and range > 0 then
+                if module and type(module.dochecktowermodifications) == "function" then
+                    local fake = Instance.new("Folder")
+                    fake.Name = unitName
+                    local fakeConfig = Instance.new("Folder")
+                    fakeConfig.Name = "Configuration"
+                    fakeConfig.Parent = fake
+
+                    local rv = Instance.new("NumberValue")
+                    rv.Name = "Range"
+                    rv.Value = range
+                    rv.Parent = fakeConfig
+
+                    if range2 and range2 > 0 then
+                        local rv2 = Instance.new("NumberValue")
+                        rv2.Name = "Range2"
+                        rv2.Value = range2
+                        rv2.Parent = fakeConfig
+                    end
+
+                    local ok = pcall(module.dochecktowermodifications, player, fake, {
+                        ManualPlacedOnPart = surface,
+                    })
+                    if ok then
+                        range = readNumberValue(fakeConfig, "Range") or range
+                        range2 = readNumberValue(fakeConfig, "Range2") or range2
+                    end
+                    fake:Destroy()
+                end
+
+                entries[#entries + 1] = {
+                    sourceLevel = level,
+                    range = range,
+                    range2 = range2 and range2 > 0 and range2 or nil,
+                }
+            end
+        end
+    end
+
+    table.sort(entries, function(a, b)
+        return a.sourceLevel < b.sourceLevel
+    end)
+
+    while #entries > 8 do
+        table.remove(entries)
+    end
+
+    return entries
+end
+
+local RANGE_COLORS = {
+    Color3.fromRGB(69, 215, 255),
+    Color3.fromRGB(99, 235, 169),
+    Color3.fromRGB(255, 216, 96),
+    Color3.fromRGB(255, 142, 78),
+    Color3.fromRGB(194, 126, 255),
+    Color3.fromRGB(255, 112, 178),
+    Color3.fromRGB(255, 102, 102),
+    Color3.fromRGB(225, 235, 245),
+}
+
+local function restoreNativeRangeParts()
+    for part, value in pairs(rangeNativeOriginals) do
+        if part and part.Parent then
+            pcall(function()
+                part.LocalTransparencyModifier = value
+            end)
+        end
+        rangeNativeOriginals[part] = nil
+    end
+end
+
+local function hideNativeRangeParts(preview)
+    return preview
+end
+
+local function destroyRangePreview()
+    if rangePreviewGui then
+        pcall(function()
+            rangePreviewGui:Destroy()
+        end)
+    end
+    if rangePreviewFolder then
+        pcall(function()
+            rangePreviewFolder:Destroy()
+        end)
+    end
+    restoreNativeRangeParts()
+    rangePreviewGui = nil
+    rangePreviewAdornee = nil
+    rangePreviewFolder = nil
+end
+
+local function rangeColor(index)
+    return RANGE_COLORS[math.clamp(index, 1, #RANGE_COLORS)]
+end
+
+local function makeRangeLabel(parent, anchor, color, level, range, base)
+    local gui = Instance.new("BillboardGui")
+    gui.Name = "CTDIG_RangeLabel_L" .. tostring(level)
+    gui.Adornee = anchor
+    gui.AlwaysOnTop = true
+    gui.LightInfluence = 0
+    gui.MaxDistance = 240
+    gui.Size = UDim2.fromOffset(138, 34)
+    gui.StudsOffsetWorldSpace = Vector3.new(0, 0.42, 0)
+    gui.Parent = parent
+
+    local label = Instance.new("TextLabel")
+    label.BackgroundColor3 = Color3.fromRGB(9, 11, 15)
+    label.BackgroundTransparency = base and 0.08 or 0.18
+    label.BorderSizePixel = 0
+    label.Size = UDim2.fromScale(1, 1)
+    label.Font = Enum.Font.GothamBold
+    label.Text = string.format("LVL %d  •  %s\n%s RANGE", level, base and "BASE" or "UPGRADE", formatCompactNumber(range))
+    label.TextColor3 = Color3.fromRGB(248, 250, 252)
+    label.TextSize = 11
+    label.TextWrapped = true
+    label.Parent = gui
+
+    local corner = Instance.new("UICorner")
+    corner.CornerRadius = UDim.new(0, 7)
+    corner.Parent = label
+
+    local stroke = Instance.new("UIStroke")
+    stroke.Color = color
+    stroke.Transparency = base and 0 or 0.18
+    stroke.Thickness = base and 1.8 or 1.1
+    stroke.Parent = label
+end
+
+local function makeRangeRing(folder, preview, root, radius, level, visualIndex, planeYOffset)
+    local base = false
+    local yOffset = (planeYOffset or (-(root.Size.Y * 0.5) + 0.06)) + ((visualIndex - 1) * 0.025)
+    local color = rangeColor(visualIndex)
+    local rangePart
+    local module = getCTDModule()
+
+    if module and type(module.makeunitrangeviewpart) == "function"
+        and preview:IsA("Model") and preview.PrimaryPart
+        and preview:FindFirstChild("HumanoidRootPart") then
+        local ok, result = pcall(
+            module.makeunitrangeviewpart,
+            base and "main" or "special",
+            preview,
+            radius * 2
+        )
+        if ok and typeof(result) == "Instance" and result:IsA("BasePart") then
+            rangePart = result
+            rangePart.Name = "CTDIG_Range_L" .. tostring(level)
+            rangePart.Color = color
+            rangePart.Transparency = base and 0.72 or 0.84
+            rangePart.CanCollide = false
+            rangePart.CanQuery = false
+            rangePart.CanTouch = false
+            rangePart.CastShadow = false
+            rangePart:SetAttribute("CTDIGRange", radius)
+            rangePart:SetAttribute("CTDIGLevel", level)
+            rangePart.Parent = folder
+        end
+    end
+
+    if not rangePart then
+        local segments = base and 28 or 18
+        local step = (2 * math.pi) / segments
+        local arc = (2 * math.pi * radius) / segments
+        local dashLength = arc * (base and 0.88 or 0.58)
+        local thickness = base and math.clamp(radius * 0.012, 0.11, 0.21)
+            or math.clamp(radius * 0.007, 0.07, 0.13)
+
+        for i = 0, segments - 1 do
+            local angle = i * step
+            local segment = Instance.new("Part")
+            segment.Name = "CTDIG_RangeRing_L" .. tostring(level)
+            segment.Anchored = false
+            segment.CanCollide = false
+            segment.CanQuery = false
+            segment.CanTouch = false
+            segment.CastShadow = false
+            segment.Massless = true
+            segment.Material = Enum.Material.Neon
+            segment.Color = color
+            segment.Transparency = base and 0.03 or 0.19
+            segment.Size = Vector3.new(dashLength, base and 0.052 or 0.032, thickness)
+            segment.CFrame = root.CFrame * CFrame.Angles(0, angle, 0) * CFrame.new(0, yOffset, -radius)
+            segment.Parent = folder
+
+            local weld = Instance.new("WeldConstraint")
+            weld.Part0 = root
+            weld.Part1 = segment
+            weld.Parent = segment
+        end
+    end
+
+    local angles = { -110, -40, 30, 100, 170 }
+    local angle = math.rad(angles[visualIndex] or ((visualIndex - 1) * 72 - 110))
+    local anchor = Instance.new("Part")
+    anchor.Name = "CTDIG_RangeLabelAnchor_L" .. tostring(level)
+    anchor.Anchored = false
+    anchor.CanCollide = false
+    anchor.CanQuery = false
+    anchor.CanTouch = false
+    anchor.CastShadow = false
+    anchor.Massless = true
+    anchor.Transparency = 1
+    anchor.Size = Vector3.new(0.1, 0.1, 0.1)
+    anchor.CFrame = root.CFrame * CFrame.Angles(0, angle, 0) * CFrame.new(0, yOffset + 0.15, -(radius + 0.2))
+    anchor.Parent = folder
+
+    local weld = Instance.new("WeldConstraint")
+    weld.Part0 = root
+    weld.Part1 = anchor
+    weld.Parent = anchor
+
+    makeRangeLabel(anchor, anchor, color, level, radius, base)
+end
+
+local function makeRangeSummary(root, entries)
+    local gui = Instance.new("BillboardGui")
+    gui.Name = "CTDIG_RangeSummary"
+    gui.Adornee = root
+    gui.AlwaysOnTop = true
+    gui.LightInfluence = 0
+    gui.MaxDistance = 180
+    gui.Size = UDim2.fromOffset(230, 42)
+    gui.StudsOffsetWorldSpace = Vector3.new(0, 4.2, 0)
+    gui.Parent = playerGui
+
+    local base = entries[1]
+    local max = entries[#entries]
+    local label = Instance.new("TextLabel")
+    label.BackgroundColor3 = Color3.fromRGB(8, 10, 14)
+    label.BackgroundTransparency = 0.12
+    label.BorderSizePixel = 0
+    label.Size = UDim2.fromScale(1, 1)
+    label.Font = Enum.Font.GothamBold
+    local secondary = base.range2 and ("   •   R2  " .. formatCompactNumber(base.range2)) or ""
+    label.Text = string.format(
+        "NOW  %s   →   MAX  %s%s",
+        formatCompactNumber(base.range),
+        formatCompactNumber(max.range),
+        secondary
+    )
+    label.TextColor3 = Color3.fromRGB(248, 250, 252)
+    label.TextSize = 12
+    label.Parent = gui
+
+    local corner = Instance.new("UICorner")
+    corner.CornerRadius = UDim.new(0, 8)
+    corner.Parent = label
+
+    local stroke = Instance.new("UIStroke")
+    stroke.Color = RANGE_COLORS[1]
+    stroke.Transparency = 0.2
+    stroke.Thickness = 1.2
+    stroke.Parent = label
+
+    rangePreviewGui = gui
+end
+
+local function refreshRangePreview()
+    if not (Toggles.CTDIGRangePreview and Toggles.CTDIGRangePreview.Value) then
+        destroyRangePreview()
+        setRangeInfo("Range Preview: OFF")
+        return
+    end
+
+    local config = findPlacementConfiguration()
+    local editing = config and config:FindFirstChild("UnitEditor")
+    local chosen = config and config:FindFirstChild("UnitChoosed")
+    local current = config and config:FindFirstChild("CurrentUnitPlacingObject")
+    local unit = chosen and chosen.Value
+    local preview = current and current.Value
+
+    if not editing or editing.Value ~= true or typeof(unit) ~= "Instance" or typeof(preview) ~= "Instance" then
+        destroyRangePreview()
+        setRangeInfo("Range Preview: select/place a unit")
+        return
+    end
+
+    local root = getRoot(preview)
+    if not root then
+        destroyRangePreview()
+        setRangeInfo("Range Preview: preview root missing")
+        return
+    end
+
+    local surface
+    do
+        local params = RaycastParams.new()
+        params.FilterType = Enum.RaycastFilterType.Exclude
+        local ignore = { preview }
+        local towers = getTowers()
+        if towers then ignore[#ignore + 1] = towers end
+        local map = Workspace:FindFirstChild("Map")
+        local enemies = map and map:FindFirstChild("Enemies")
+        if enemies then ignore[#ignore + 1] = enemies end
+        if player.Character then ignore[#ignore + 1] = player.Character end
+        params.FilterDescendantsInstances = ignore
+        local hit = Workspace:Raycast(
+            root.Position + Vector3.new(0, 8, 0),
+            Vector3.new(0, -40, 0),
+            params
+        )
+        surface = hit and hit.Instance or nil
+    end
+
+    local entries = unitLevelRanges(unit.Name, preview, surface)
+
+    local native = preview:FindFirstChild("RangeViewPart", true)
+    local native2 = preview:FindFirstChild("RangeViewPart2", true)
+    local nativeRadius
+    local nativeRadius2
+
+    if native and native:IsA("BasePart") then
+        nativeRadius = native:IsA("MeshPart")
+            and math.max(native.Size.X, native.Size.Z) * 0.5
+            or math.max(native.Size.Y, native.Size.Z) * 0.5
+    end
+    if native2 and native2:IsA("BasePart") then
+        nativeRadius2 = native2:IsA("MeshPart")
+            and math.max(native2.Size.X, native2.Size.Z) * 0.5
+            or math.max(native2.Size.Y, native2.Size.Z) * 0.5
+    end
+
+    local liveConfig = preview:FindFirstChild("Configuration")
+    local liveRange = readNumberValue(liveConfig, "Range")
+    local liveRange2 = readNumberValue(liveConfig, "Range2")
+    local currentRadius = nativeRadius or liveRange
+    local currentRadius2 = nativeRadius2 or liveRange2
+    local manualSpecial = nativeRadius and liveRange
+        and math.abs(nativeRadius - liveRange) > 0.08
+
+    if manualSpecial and currentRadius and currentRadius > 0 then
+        entries = {{
+            sourceLevel = 0,
+            range = currentRadius,
+            range2 = currentRadius2,
+            manual = true,
+        }}
+    else
+        local currentEntry
+        for _, entry in ipairs(entries) do
+            if entry.sourceLevel == 0 then
+                currentEntry = entry
+                break
+            end
+        end
+        if currentRadius and currentRadius > 0 then
+            if currentEntry then
+                currentEntry.range = currentRadius
+                currentEntry.range2 = currentRadius2 or currentEntry.range2
+            else
+                entries[#entries + 1] = {
+                    sourceLevel = 0,
+                    range = currentRadius,
+                    range2 = currentRadius2,
+                }
+                table.sort(entries, function(a, b) return a.sourceLevel < b.sourceLevel end)
+            end
+        end
+    end
+
+    if #entries == 0 then
+        destroyRangePreview()
+        setRangeInfo("Range Preview: no range data for " .. unit.Name)
+        return
+    end
+
+    local signatureParts = { unit.Name, surface and surface:GetFullName() or "surface=nil" }
+    for _, entry in ipairs(entries) do
+        signatureParts[#signatureParts + 1] = tostring(entry.sourceLevel)
+            .. "=" .. string.format("%.4f", entry.range)
+            .. "/" .. string.format("%.4f", entry.range2 or 0)
+    end
+    local signature = table.concat(signatureParts, ":")
+    local rebuild = not rangePreviewFolder
+        or not rangePreviewFolder.Parent
+        or rangePreviewFolder.Parent ~= preview
+        or rangePreviewAdornee ~= root
+        or rangePreviewFolder:GetAttribute("Signature") ~= signature
+
+    hideNativeRangeParts(preview)
+
+    local first = entries[1]
+    local last = entries[#entries]
+    local secondaryInfo = first.range2
+        and ("  |  R2: " .. formatCompactNumber(first.range2)) or ""
+    setRangeInfo(string.format(
+        "%s  |  NOW: %s  |  MAX L%d: %s%s%s",
+        unit.Name,
+        formatCompactNumber(first.range),
+        last.sourceLevel,
+        formatCompactNumber(last.range),
+        secondaryInfo,
+        manualSpecial and "  |  MANUAL" or ""
+    ))
+
+    if not rebuild then

@@ -12,12 +12,17 @@
         session.combatEnemyFolder = enemiesFolder
 
         if enemiesFolder then
+            -- Every DIRECT child of Workspace.Map.Enemies is authoritative.
+            -- Do not require TotalLife/Configuration/root to already exist:
+            -- those descendants can replicate a frame or more after ChildAdded.
             for _, enemy in ipairs(enemiesFolder:GetChildren()) do
                 session.combatEnemies[enemy] = true
             end
 
             session.combatEnemySourceConnections[#session.combatEnemySourceConnections + 1] =
                 enemiesFolder.ChildAdded:Connect(function(enemy)
+                    -- Register immediately. updateKillPreview will simply wait until
+                    -- health/root/path data finishes replicating.
                     if session.alive and enemy.Parent == session.combatEnemyFolder then
                         session.combatEnemies[enemy] = true
                     end
@@ -70,10 +75,16 @@ local function getEnemyModels()
     local direct = {}
     local stale = {}
 
+    -- Authoritative reconciliation. This fixes replication races where ChildAdded
+    -- fires before TotalLife/Configuration/HumanoidRootPart have appeared.
     if enemiesFolder then
         for _, enemy in ipairs(enemiesFolder:GetChildren()) do
             direct[enemy] = true
             session.combatEnemies[enemy] = true
+
+            -- Include the direct child even if its combat descendants are still
+            -- replicating. healthData/root checks later in updateKillPreview decide
+            -- whether it is ready THIS tick; it will be retried on the next tick.
             enemies[#enemies + 1] = enemy
         end
     end
@@ -98,6 +109,8 @@ local function towerBelongsToLocalPlayer(tower)
         return owner == player.Name or owner == tostring(player.UserId)
     end
 
+    -- Some freshly replicated towers receive Configuration.Owner a frame
+    -- after the model itself. Do not permanently lose them from visuals.
     local config = tower and tower:FindFirstChild("Configuration")
     return config ~= nil and config:FindFirstChild("Owner") == nil
 end
@@ -169,6 +182,9 @@ local function predictTargetBetter(tower, candidate, best, shotTime)
             end
         end
     else
+        -- "First" and unknown modes: prefer the enemy that reaches the end
+        -- sooner. This mirrors the useful meaning of First without depending
+        -- on a fragile guessed Progress scale.
         local candidateExit = candidate.trajectory.exitTime or 60
         local bestExit = best.trajectory.exitTime or 60
         if candidateExit ~= bestExit then
@@ -197,6 +213,10 @@ local function updateKillPreview()
     lastKillPreviewUpdate = now
 
     local enemiesFolder, towersFolder = session.bindCombatSources()
+
+    -- Long enough to reach the real end of normal paths, while path nodes keep
+    -- turns accurate. If path metadata is unavailable, the fallback trajectory
+    -- is deliberately marked incomplete in diagnostics.
     local horizon = 120
     local enemies = {}
     local seen = {}
@@ -244,9 +264,17 @@ local function updateKillPreview()
 
     if #enemies == 0 then
         local stale = {}
-        for enemy in pairs(killHighlights) do stale[#stale + 1] = enemy end
-        for enemy in pairs(killLabels) do if not killHighlights[enemy] then stale[#stale + 1] = enemy end end
-        for _, enemy in ipairs(stale) do removeKillHighlight(enemy) end
+        for enemy in pairs(killHighlights) do
+            stale[#stale + 1] = enemy
+        end
+        for enemy in pairs(killLabels) do
+            if not killHighlights[enemy] then
+                stale[#stale + 1] = enemy
+            end
+        end
+        for _, enemy in ipairs(stale) do
+            removeKillHighlight(enemy)
+        end
         setKillInfo("Kill Preview: waiting for replicated enemy data")
         setCombatDiagPredict(string.format(
             "%s | ready=0 direct=%d folder=%s health/root-wait=%d",
@@ -272,14 +300,19 @@ local function updateKillPreview()
     end
 
     for towerModel in pairs(session.combatTowers) do
-        if towerModel and towerModel.Parent == session.combatTowerFolder and getRoot(towerModel) then
+        if towerModel
+            and towerModel.Parent == session.combatTowerFolder
+            and getRoot(towerModel)
+        then
             towerCandidates[#towerCandidates + 1] = towerModel
         else
             staleTowers[#staleTowers + 1] = towerModel
         end
     end
 
-    for _, towerModel in ipairs(staleTowers) do session.combatTowers[towerModel] = nil end
+    for _, towerModel in ipairs(staleTowers) do
+        session.combatTowers[towerModel] = nil
+    end
 
     for _, towerModel in ipairs(towerCandidates) do
         if towerBelongsToLocalPlayer(towerModel) then
@@ -341,6 +374,9 @@ local function updateKillPreview()
         return
     end
 
+    -- One shared event queue: one tower gets exactly one target per attack
+    -- interval. This is the key difference from summing DPS independently into
+    -- every zombie.
     local totalHealth = 0
     local smallestDamage = math.huge
     local aliveEnemies = 0
@@ -349,24 +385,32 @@ local function updateKillPreview()
         aliveEnemies = aliveEnemies + 1
     end
     for _, tower in ipairs(towers) do
-        if tower.damage > 0 then smallestDamage = math.min(smallestDamage, tower.damage) end
+        if tower.damage > 0 then
+            smallestDamage = math.min(smallestDamage, tower.damage)
+        end
     end
 
-    local usefulShots = smallestDamage < math.huge and math.ceil(totalHealth / math.max(0.001, smallestDamage)) or 0
+    local usefulShots = smallestDamage < math.huge
+        and math.ceil(totalHealth / math.max(0.001, smallestDamage)) or 0
     local maxEvents = math.clamp(usefulShots * 4 + #towers * 24 + #enemies * 16, 400, 10000)
     local shots = 0
     local events = 0
 
     for _ = 1, maxEvents do
-        if aliveEnemies <= 0 then break end
+        if aliveEnemies <= 0 then
+            break
+        end
 
         local activeTower
         for _, tower in ipairs(towers) do
-            if tower.readyAt <= horizon and (not activeTower or tower.readyAt < activeTower.readyAt) then
+            if tower.readyAt <= horizon
+                and (not activeTower or tower.readyAt < activeTower.readyAt) then
                 activeTower = tower
             end
         end
-        if not activeTower then break end
+        if not activeTower then
+            break
+        end
 
         events = events + 1
         local shotTime = activeTower.readyAt
@@ -374,14 +418,18 @@ local function updateKillPreview()
         local nextEnter
 
         for enemyIndex, enemy in ipairs(enemies) do
-            if enemy.remaining > 0 and not enemy.healthData.invulnerable and shotTime <= enemy.trajectory.exitTime + 1e-4 then
+            if enemy.remaining > 0 and not enemy.healthData.invulnerable
+                and shotTime <= enemy.trajectory.exitTime + 1e-4 then
                 local intervals = activeTower.coverage[enemyIndex]
                 if intervals then
                     local interval, inside = intervalAtOrAfter(intervals, shotTime)
                     if interval then
                         if inside then
-                            if predictTargetBetter(activeTower, enemy, bestEnemy, shotTime) then bestEnemy = enemy end
-                        elseif interval.enter <= horizon and (not nextEnter or interval.enter < nextEnter) then
+                            if predictTargetBetter(activeTower, enemy, bestEnemy, shotTime) then
+                                bestEnemy = enemy
+                            end
+                        elseif interval.enter <= horizon
+                            and (not nextEnter or interval.enter < nextEnter) then
                             nextEnter = interval.enter
                         end
                     end
@@ -390,14 +438,20 @@ local function updateKillPreview()
         end
 
         if bestEnemy then
-            local damage = activeTower.damageByEnemy[bestEnemy.index] or effectiveDamageAgainstEnemy(activeTower.stats, bestEnemy)
+            local damage = activeTower.damageByEnemy[bestEnemy.index]
+                or effectiveDamageAgainstEnemy(activeTower.stats, bestEnemy)
             local before = bestEnemy.remaining
             bestEnemy.remaining = math.max(0, before - math.max(0, damage))
             bestEnemy.predictedShots = bestEnemy.predictedShots + 1
             shots = shots + 1
-            if before > 0 and bestEnemy.remaining <= 0 then aliveEnemies = aliveEnemies - 1 end
+
+            if before > 0 and bestEnemy.remaining <= 0 then
+                aliveEnemies = aliveEnemies - 1
+            end
+
             activeTower.readyAt = shotTime + activeTower.interval
         elseif nextEnter then
+            -- A ready tower can hold its shot until a target enters range.
             activeTower.readyAt = math.max(shotTime + 0.001, nextEnter)
         else
             activeTower.readyAt = math.huge
@@ -411,16 +465,34 @@ local function updateKillPreview()
             safe = safe + 1
         else
             leaks = leaks + 1
-            if not enemy.covered then uncovered = uncovered + 1 end
+            if not enemy.covered then
+                uncovered = uncovered + 1
+            end
         end
 
-        setEnemyKillColor(enemy.model, lethal, enemy.health, enemy.remaining, enemy.potentialDps)
+        setEnemyKillColor(
+            enemy.model,
+            lethal,
+            enemy.health,
+            enemy.remaining,
+            enemy.potentialDps
+        )
     end
 
     local stale = {}
-    for enemy in pairs(killHighlights) do if not seen[enemy] then stale[#stale + 1] = enemy end end
-    for enemy in pairs(killLabels) do if not seen[enemy] and not killHighlights[enemy] then stale[#stale + 1] = enemy end end
-    for _, enemy in ipairs(stale) do removeKillHighlight(enemy) end
+    for enemy in pairs(killHighlights) do
+        if not seen[enemy] then
+            stale[#stale + 1] = enemy
+        end
+    end
+    for enemy in pairs(killLabels) do
+        if not seen[enemy] and not killHighlights[enemy] then
+            stale[#stale + 1] = enemy
+        end
+    end
+    for _, enemy in ipairs(stale) do
+        removeKillHighlight(enemy)
+    end
 
     setKillInfo(string.format(
         "Predict: %d SAFE | %d LEAK | %d enemies | %d towers%s",

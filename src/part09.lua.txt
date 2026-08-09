@@ -1,0 +1,476 @@
+    })
+end
+
+local function bindLevel(tower)
+    local config = tower and tower:FindFirstChild("Configuration")
+    local level = config and config:FindFirstChild("Level")
+    if not level or not level:IsA("ValueBase") then
+        return
+    end
+
+    local state = ensureTowerState(tower)
+    local existing = towerConnections[tower] and towerConnections[tower].level
+    if state.boundLevel == level and existing and existing.Connected then
+        return
+    end
+    state.boundLevel = level
+
+    towerConnect(tower, level.Changed, function(value)
+        local current = tonumber(value) or getLevel(tower)
+        recordUpgrade(tower, current)
+    end, "level")
+end
+
+local function bindTarget(tower)
+    if not tower then
+        return
+    end
+
+    local config = tower:FindFirstChild("Configuration")
+    local other = config and config:FindFirstChild("OtherConfig")
+        or tower:FindFirstChild("OtherConfig")
+    if not other then
+        return
+    end
+
+    local state = ensureTowerState(tower)
+    local otherWatcher = towerConnections[tower] and towerConnections[tower].target_container
+    if state.boundOtherConfig ~= other or not (otherWatcher and otherWatcher.Connected) then
+        state.boundOtherConfig = other
+        towerConnect(tower, other.ChildAdded, function(child)
+            if child.Name == "Targets" then
+                task.defer(function()
+                    if session.alive and tower.Parent then
+                        bindTarget(tower)
+                    end
+                end)
+            end
+        end, "target_container")
+    end
+
+    local targets = other:FindFirstChild("Targets")
+    if not targets or not targets:IsA("ValueBase") then
+        return
+    end
+
+    local existing = towerConnections[tower] and towerConnections[tower].target
+    if state.boundTarget == targets and existing and existing.Connected then
+        return
+    end
+    state.boundTarget = targets
+    state.target = tostring(targets.Value)
+
+    towerConnect(tower, targets.Changed, function(value)
+        local mode = tostring(value)
+        local previous = state.target
+        state.target = mode
+
+        if recording and not replaying and state.ownedByRecorderPlayer
+            and previous ~= nil and mode ~= previous then
+            queueTowerAction(tower, {
+                type = "target",
+                mode = mode,
+            })
+        end
+    end, "target")
+end
+
+local function bindCooldown(tower, cooldown)
+    if not cooldown or not cooldown:IsA("ValueBase") then
+        return
+    end
+
+    local abilityNumber = cooldown.Name:match("^Ability(%d+)Cooldown$")
+    if not abilityNumber then
+        return
+    end
+
+    local state = ensureTowerState(tower)
+    local ability = "Ability" .. abilityNumber
+    local key = "cooldown_" .. ability
+    local existing = towerConnections[tower] and towerConnections[tower][key]
+    if state.boundCooldowns[ability] == cooldown and existing and existing.Connected then
+        return
+    end
+    state.boundCooldowns[ability] = cooldown
+    state.cooldowns[ability] = tonumber(cooldown.Value) or 0
+
+    towerConnect(tower, cooldown.Changed, function(value)
+        local current = tonumber(value) or 0
+        local previous = tonumber(state.cooldowns[ability]) or 0
+        state.cooldowns[ability] = current
+
+        if recording and not replaying and state.ownedByRecorderPlayer
+            and previous <= 0 and current > 0 then
+            state.lastAbilityRecordedAt = state.lastAbilityRecordedAt or {}
+            state.lastAbilityRecordedAt[ability] = os.clock()
+            queueTowerAction(tower, {
+                type = "ability",
+                ability = ability,
+            })
+        end
+    end, key)
+end
+
+local function capturePlacementAttempt()
+    if not recording or replaying then
+        return
+    end
+
+    local config = findPlacementConfiguration()
+    local chosen = config and config:FindFirstChild("UnitChoosed")
+    local orientation = config and config:FindFirstChild("UnitOrientation")
+    local current = config and config:FindFirstChild("CurrentUnitPlacingObject")
+    local unit = chosen and chosen.Value
+
+    if typeof(unit) ~= "Instance" then
+        placementAttempt = nil
+        return
+    end
+
+    local preview = current and current.Value
+    local position = typeof(preview) == "Instance" and rawPlacementPosition(preview) or nil
+    local surface = position and findPlacementSurface(preview, position) or nil
+    placementAttempt = {
+        unitName = unit.Name,
+        source = sourceFor(unit),
+        rotation = orientation and vec(orientation.Value) or vec(Vector3.zero),
+        position = position and vec(position) or nil,
+        surface = surface and describeSurface(surface, position) or nil,
+        wave = getWave(),
+        startedAt = os.clock(),
+        claimed = false,
+    }
+    session.placementQueue[#session.placementQueue + 1] = placementAttempt
+    while #session.placementQueue > 24 do
+        table.remove(session.placementQueue, 1)
+    end
+end
+
+local function manualPlacementFor(unitName)
+    local now = os.clock()
+
+    local function matches(placement)
+        return placement
+            and not placement.claimed
+            and placement.unitName == unitName
+            and now - placement.startedAt <= 10
+    end
+
+    for index = #session.placementQueue, 1, -1 do
+        local queued = session.placementQueue[index]
+        if queued.claimed or now - queued.startedAt > 15 then
+            table.remove(session.placementQueue, index)
+        end
+    end
+
+    for _, queued in ipairs(session.placementQueue) do
+        if matches(queued) then
+            return queued
+        end
+    end
+
+    if matches(recentPlacement) then
+        return recentPlacement
+    end
+    if matches(placementAttempt) then
+        return placementAttempt
+    end
+end
+
+local function rememberSelection()
+    if placementRecorderBound then
+        return true
+    end
+
+    local config = findPlacementConfiguration()
+    local commencing = config and config:FindFirstChild("CommencingPlace")
+    if not commencing or not commencing:IsA("BoolValue") then
+        return false
+    end
+
+    placementConfiguration = config
+    placementRecorderBound = true
+    connect(commencing.Changed, function(value)
+        if not session.alive or commencing.Parent ~= placementConfiguration then
+            placementRecorderBound = false
+            return
+        end
+        if value == true then
+            capturePlacementAttempt()
+        end
+        if value ~= true and placementAttempt then
+            if recording and not placementAttempt.claimed then
+                recentPlacement = placementAttempt
+            end
+            placementAttempt = nil
+        end
+    end)
+
+    return true
+end
+
+local function ensurePlacementRecorder()
+    if rememberSelection() then
+        return true
+    end
+
+    if placementRecorderBinding then
+        return false
+    end
+
+    placementRecorderBinding = true
+    task.spawn(function()
+        local started = os.clock()
+        while session.alive and not placementRecorderBound and os.clock() - started < 30 do
+            if rememberSelection() then
+                break
+            end
+            task.wait(0.1)
+        end
+        placementRecorderBinding = false
+    end)
+
+    return false
+end
+
+local function skipDetected(wave, source)
+    if not recording or replaying then
+        return false
+    end
+
+    local now = os.clock()
+    local hasPendingVote = pendingSkipWave ~= nil and now - pendingSkipAt <= 60
+    local nativeAutoSkip = getNativeAutoSkipSetting()
+    if not hasPendingVote and not (nativeAutoSkip and nativeAutoSkip.Value == true) then
+        return false
+    end
+
+    if hasPendingVote then
+        wave = pendingSkipWave
+    else
+        wave = tonumber(wave) or getWave()
+    end
+
+    wave = math.max(0, math.floor(tonumber(wave) or 0))
+
+    if lastSkipConfirmationWave
+        and now - lastSkipConfirmationAt <= 0.75
+        and math.abs(wave - lastSkipConfirmationWave) <= 1 then
+        return false
+    end
+
+    if recordedSkipWaves[wave] then
+        return false
+    end
+
+    recordedSkipWaves[wave] = source or true
+    lastSkipConfirmationWave = wave
+    lastSkipConfirmationAt = now
+    pendingSkipWave = nil
+    pendingSkipAt = 0
+    return addAction({
+        type = "skip",
+        wave = wave,
+    })
+end
+
+local function resolveSellTowerFromButton(button)
+    if not button or not button:IsA("GuiButton") then
+        return nil
+    end
+
+    local node = button.Parent
+    for _ = 1, 6 do
+        if not node then
+            break
+        end
+        local data = node:FindFirstChild("Data")
+        local object = data and data:FindFirstChild("Object")
+        if object and object:IsA("ObjectValue") and object.Value then
+            return object.Value
+        end
+        node = node.Parent
+    end
+    return nil
+end
+
+local function recordSellIntent(tower, source)
+    if not recording or replaying or not tower or not tower.Parent then
+        return false
+    end
+    if not isMine(tower) or baselineTowers[tower] then
+        return false
+    end
+
+    local state = ensureTowerState(tower)
+    if state.sold then
+        return true
+    end
+
+    if not ids[tower] then
+        local placement = manualPlacementFor(tower.Name)
+        recordPlace(tower, placement)
+        if placement == recentPlacement and ids[tower] then
+            recentPlacement = nil
+        end
+    end
+
+    state.sold = true
+    state.sellSeenAt = os.clock()
+    state.sellSource = source or "unknown"
+
+    local ok = queueTowerAction(tower, {
+        type = "sell",
+    })
+    if ok then
+        debugLog("sell detected via " .. tostring(state.sellSource) .. " | " .. tostring(tower.Name))
+    end
+    return ok
+end
+
+local function bindSellButton(button)
+    if not button or button.Name ~= "RemoveButton" or not button:IsA("GuiButton") then
+        return
+    end
+
+    local bindings = session.sourceBindings
+    if bindings.sellButtons[button] then
+        return
+    end
+    bindings.sellButtons[button] = true
+
+    connect(button.MouseButton1Down, function()
+        local tower = resolveSellTowerFromButton(button)
+        if tower then
+            recordSellIntent(tower, "RemoveButton.MouseButton1Down")
+        end
+    end)
+
+    connect(button.Activated, function()
+        local tower = resolveSellTowerFromButton(button)
+        if tower then
+            recordSellIntent(tower, "RemoveButton.Activated")
+        end
+    end)
+end
+
+local function bindSellUi()
+    local playerGui = player:FindFirstChildOfClass("PlayerGui") or player:WaitForChild("PlayerGui", 10)
+    if not playerGui then
+        return
+    end
+
+    for _, descendant in ipairs(playerGui:GetDescendants()) do
+        bindSellButton(descendant)
+    end
+
+    local bindings = session.sourceBindings
+    if not bindings.sellGuis[playerGui] then
+        bindings.sellGuis[playerGui] = true
+        connect(playerGui.DescendantAdded, function(descendant)
+            if session.alive then
+                bindSellButton(descendant)
+            end
+        end)
+    end
+end
+
+local function guiTreeEnabled(object)
+    local node = object
+    while node and node ~= playerGui do
+        if node:IsA("ScreenGui") and node.Enabled == false then
+            return false
+        end
+        if node:IsA("GuiObject") and node.Visible == false then
+            return false
+        end
+        node = node.Parent
+    end
+    return true
+end
+
+local function towerFromDataContainer(container)
+    if not container then
+        return nil
+    end
+    local data = container:FindFirstChild("Data")
+    local object = data and data:FindFirstChild("Object")
+    local tower = object and object:IsA("ObjectValue") and object.Value or nil
+    local towers = getTowers()
+    if tower and towers and tower.Parent == towers and isMine(tower) then
+        return tower
+    end
+    return nil
+end
+
+local function selectedTowerFromGui()
+    local towers = getTowers()
+    if not towers or not playerGui then
+        return nil
+    end
+
+    for _, name in ipairs({ "TowerManageGui", "UpgradeGui" }) do
+        local gui = playerGui:FindFirstChild(name)
+        if gui and guiTreeEnabled(gui) then
+            local direct = towerFromDataContainer(gui)
+            if direct then
+                return direct
+            end
+        end
+    end
+
+    local fallback
+    for _, object in ipairs(playerGui:GetDescendants()) do
+        if object:IsA("ObjectValue") and object.Name == "Object" then
+            local tower = object.Value
+            if tower and tower.Parent == towers and isMine(tower) then
+                if guiTreeEnabled(object) then
+                    return tower
+                end
+                fallback = fallback or tower
+            end
+        end
+    end
+    return fallback
+end
+
+local function resolveTowerFromActionButton(button)
+    if not button or not button:IsA("GuiButton") then
+        return nil
+    end
+    local node = button.Parent
+    for _ = 1, 7 do
+        if not node then
+            break
+        end
+        local tower = towerFromDataContainer(node)
+        if tower then
+            return tower
+        end
+        node = node.Parent
+    end
+    return selectedTowerFromGui()
+end
+
+local function recorderSettings()
+    local data = player:FindFirstChild("PlayerData")
+    return data and data:FindFirstChild("Settings")
+end
+
+local function hotkeyText(input)
+    if not input then
+        return ""
+    end
+    local ok, text = pcall(UserInputService.GetStringForKeyCode, UserInputService, input.KeyCode)
+    if ok and type(text) == "string" and text ~= "" then
+        return text:upper()
+    end
+    return tostring(input.KeyCode.Name or ""):upper()
+end
+
+local function settingMatchesHotkey(settings, settingName, keyText)
+    local value = settings and settings:FindFirstChild(settingName)
+    if not value then
+        return false
+    end

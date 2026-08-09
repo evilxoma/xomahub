@@ -1,0 +1,384 @@
+        return
+    end
+
+    destroyRangePreview()
+
+    local folder = Instance.new("Folder")
+    folder.Name = "CTDIG_RangePreview"
+    folder:SetAttribute("Signature", signature)
+    folder.Parent = preview
+    rangePreviewFolder = folder
+    rangePreviewAdornee = root
+
+    local planeYOffset = -(root.Size.Y * 0.5) + 0.06
+    if native and native:IsA("BasePart") then
+        planeYOffset = root.CFrame:PointToObjectSpace(native.Position).Y + 0.035
+    end
+
+    local renderedRanges = {}
+    renderedRanges[string.format("%.4f", first.range)] = true
+    local visualIndex = 1
+    for _, entry in ipairs(entries) do
+        local rangeKey = string.format("%.4f", entry.range)
+        if entry.sourceLevel ~= first.sourceLevel and not renderedRanges[rangeKey] then
+            renderedRanges[rangeKey] = true
+            visualIndex = visualIndex + 1
+            makeRangeRing(folder, preview, root, entry.range, entry.sourceLevel, visualIndex, planeYOffset)
+        end
+    end
+    makeRangeSummary(root, entries)
+end
+
+local function towerBuffs(tower)
+    local module = getCTDModule()
+    if module and type(module.calculatetowerbuffs) == "function" then
+        local ok, buffs = pcall(module.calculatetowerbuffs, tower)
+        if ok and type(buffs) == "table" then
+            return buffs
+        end
+    end
+    return {
+        damage = 0,
+        firerate = 0,
+        range = 0,
+    }
+end
+
+local function towerSetting(tower, name)
+    local config = tower and tower:FindFirstChild("Configuration")
+    local direct = readNumberValue(config, name)
+    if direct ~= nil then
+        return direct
+    end
+    local nested = readNumberValue(config, name, true)
+    if nested ~= nil then
+        return nested
+    end
+    local units = ReplicatedStorage:FindFirstChild("Units")
+    local unit = tower and units and units:FindFirstChild(tower.Name)
+    local levels = unit and unit:FindFirstChild("Levels")
+    local level = levels and levels:FindFirstChild(tostring(getLevel(tower)))
+    local settings = level and level:FindFirstChild("Settings")
+    return readNumberValue(settings, name)
+end
+
+local function towerRange(tower)
+    local config = tower and tower:FindFirstChild("Configuration")
+    local other = tower and tower:FindFirstChild("OtherConfig")
+        or (config and config:FindFirstChild("OtherConfig"))
+    local real = readNumberValue(other, "RealRange") or readNumberValue(other, "RealRange", true)
+    if real and real > 0 then
+        return real
+    end
+    local base = towerSetting(tower, "Range") or 0
+    local buffs = towerBuffs(tower)
+    return math.max(0, base * math.max(0, (tonumber(buffs.range) or 0) + 1))
+end
+
+local function towerCombatStats(tower)
+    if not tower or not tower.Parent then
+        return nil
+    end
+    local config = tower:FindFirstChild("Configuration")
+    local baseDamage = readNumberValue(config, "Damage")
+        or tonumber(towerSetting(tower, "Damage"))
+        or 0
+    local baseReload = readNumberValue(config, "ReloadTime")
+        or readNumberValue(config, "FireRate")
+        or tonumber(towerSetting(tower, "ReloadTime"))
+        or tonumber(towerSetting(tower, "FireRate"))
+        or tonumber(towerSetting(tower, "AttackRate"))
+    if baseDamage <= 0 or not baseReload or baseReload <= 0 then
+        return nil
+    end
+    local buffs = towerBuffs(tower)
+    local damageMultiplier = math.max(0, (tonumber(buffs.damage) or 0) + 1)
+    local speedMultiplier = math.max(0.05, (tonumber(buffs.firerate) or 0) + 1)
+    local damage = math.max(0, baseDamage * damageMultiplier)
+    local interval = math.max(0.015, baseReload / speedMultiplier)
+    local range = towerRange(tower)
+    return {
+        damage = damage,
+        interval = interval,
+        dps = interval > 0 and damage / interval or 0,
+        range = range,
+        baseDamage = baseDamage,
+        baseReload = baseReload,
+        damageMultiplier = damageMultiplier,
+        speedMultiplier = speedMultiplier,
+    }
+end
+
+local function towerDamageType(tower)
+    local module = getCTDModule()
+    if module and type(module.gettowerdamagetype) == "function" and tower then
+        local ok, mainType, subType = pcall(module.gettowerdamagetype, nil, tower.Name)
+        if ok then
+            return mainType, subType
+        end
+    end
+    return nil, nil
+end
+
+local function towerReadyIn(tower, interval, now)
+    interval = math.max(0.015, tonumber(interval) or 0.015)
+    local lastAttacked = readNumberValue(tower, "LastAttacked")
+    if lastAttacked ~= nil then
+        lastAttacked = tonumber(lastAttacked)
+        if not lastAttacked or lastAttacked ~= lastAttacked or lastAttacked == math.huge or lastAttacked > 1e12 then
+            return math.huge
+        end
+        return math.clamp(lastAttacked, 0, interval)
+    end
+    return interval
+end
+
+local function readAdjustedEnemyStat(enemy, name, defaultValue)
+    local config = enemy and enemy:FindFirstChild("Configuration")
+    local valueObject = config and config:FindFirstChild(name)
+    local value = valueObject and valueObject:IsA("ValueBase") and tonumber(valueObject.Value) or nil
+    if value == nil then
+        return defaultValue
+    end
+    local offset = config:FindFirstChild(name .. "Offset")
+    if offset and offset:IsA("ValueBase") then
+        value = value + (tonumber(offset.Value) or 0)
+        local minLimit = readNumberValue(offset, "MinLimit")
+        local maxLimit = readNumberValue(offset, "MaxLimit")
+        value = math.clamp(value, minLimit ~= nil and minLimit or -math.huge, maxLimit ~= nil and maxLimit or math.huge)
+    end
+    return value
+end
+
+local function effectiveDamageAgainstEnemy(towerStats, enemyData)
+    if not towerStats or not enemyData or not enemyData.model then
+        return 0
+    end
+    if enemyData.healthData and enemyData.healthData.invulnerable then
+        return 0
+    end
+    local enemy = enemyData.model
+    if enemy:FindFirstChild("HPInvulnerable") then
+        return 0
+    end
+    local damage = math.max(0, tonumber(towerStats.damage) or 0)
+    if damage <= 0 then
+        return 0
+    end
+    local config = enemy:FindFirstChild("Configuration")
+    local mainType = towerStats.damageType
+    local subType = towerStats.damageSubtype
+    local typeResists = config and config:FindFirstChild("DamageTypeResistance")
+    if typeResists then
+        for _, resistanceValue in ipairs(typeResists:GetChildren()) do
+            if resistanceValue:IsA("ValueBase") then
+                local name = resistanceValue.Name
+                if name == mainType or name == subType or (mainType and subType and name == mainType .. subType) then
+                    local percent = tonumber(resistanceValue.Value) or 0
+                    if mainType == "Elemental" then
+                        percent = math.min(50, percent)
+                    end
+                    damage = damage * math.max(0, 1 - percent / 100)
+                end
+            end
+        end
+    end
+    local protection = readAdjustedEnemyStat(enemy, "Protection", 0) or 0
+    damage = math.max(0, damage * ((100 - protection) / 100))
+    local resistance = readAdjustedEnemyStat(enemy, "Resistance", 0) or 0
+    if resistance ~= 0 and mainType ~= "TrueDamage" then
+        damage = math.clamp(damage - resistance, damage * 0.33, damage * 3)
+    end
+    local shield = readAdjustedEnemyStat(enemy, "Shield", 0) or 0
+    local plating = readAdjustedEnemyStat(enemy, "Plating", 0) or 0
+    if shield <= 0 and plating > 0 and mainType ~= "TrueDamage" and damage <= plating then
+        if mainType == "Explosive" then
+            damage = damage * 0.35
+        else
+            damage = math.min(damage, 0.15)
+        end
+    end
+    local minDamageArmor = readAdjustedEnemyStat(enemy, "MinDamageArmor", nil)
+    if minDamageArmor ~= nil and damage <= minDamageArmor then
+        damage = 0
+    end
+    local maxDamageArmor = readAdjustedEnemyStat(enemy, "MaxDamageArmor", nil)
+    if maxDamageArmor ~= nil and maxDamageArmor < damage then
+        damage = maxDamageArmor
+    end
+    return math.max(0, damage)
+end
+
+local function sampleTowerLiveDPS(tower, now)
+    now = now or os.clock()
+    local total = readNumberValue(tower, "TotalDMG")
+    if total == nil then
+        return nil
+    end
+    local state = dpsSamples[tower]
+    if not state then
+        state = { lastTotal = total, lastTime = now, live = 0, recentDamageAt = 0 }
+        dpsSamples[tower] = state
+        return 0
+    end
+    local dt = now - (state.lastTime or now)
+    if dt >= 0.18 then
+        local delta = total - (state.lastTotal or total)
+        if delta < 0 then delta = 0 end
+        local instant = delta / math.max(dt, 0.001)
+        if delta > 0 then
+            state.recentDamageAt = now
+            if state.live and state.live > 0 then
+                state.live = state.live * 0.58 + instant * 0.42
+            else
+                state.live = instant
+            end
+        elseif now - (state.recentDamageAt or 0) > 1.5 then
+            state.live = (state.live or 0) * 0.72
+            if state.live < 0.01 then state.live = 0 end
+        end
+        state.lastTotal = total
+        state.lastTime = now
+    end
+    return math.max(0, tonumber(state.live) or 0)
+end
+
+local function towerDamage(tower)
+    local stats = towerCombatStats(tower)
+    return stats and stats.damage or 0
+end
+local function towerAttackInterval(tower)
+    local stats = towerCombatStats(tower)
+    return stats and stats.interval or nil
+end
+local function towerDPS(tower)
+    local stats = towerCombatStats(tower)
+    return stats and stats.dps or nil
+end
+
+local function ensureDpsGui(tower)
+    if not tower or not tower.Parent then return end
+    local root = getRoot(tower)
+    if not root then return end
+    local data = dpsGuis[tower]
+    if data and data.gui and data.gui.Parent and data.gui.Adornee == root then return data end
+    if data and data.gui then pcall(function() data.gui:Destroy() end) end
+    local gui = Instance.new("BillboardGui")
+    gui.Name = "CTDIG_DPS"
+    gui.Adornee = root
+    gui.AlwaysOnTop = true
+    gui.Enabled = true
+    gui.LightInfluence = 0
+    gui.MaxDistance = 10000
+    gui.Size = UDim2.fromOffset(176, 44)
+    local offsetY = 3.5
+    if tower:IsA("Model") then
+        local ok, boxCFrame, boxSize = pcall(tower.GetBoundingBox, tower)
+        if ok and typeof(boxCFrame) == "CFrame" and typeof(boxSize) == "Vector3" then
+            offsetY = math.max(2.7, boxCFrame.Position.Y + boxSize.Y * 0.5 - root.Position.Y + 1.45)
+        end
+    end
+    gui.StudsOffsetWorldSpace = Vector3.new(0, offsetY, 0)
+    gui.Parent = playerGui
+    local label = Instance.new("TextLabel")
+    label.Name = "Text"
+    label.BackgroundColor3 = Color3.fromRGB(12, 14, 18)
+    label.BackgroundTransparency = 0.12
+    label.BorderSizePixel = 0
+    label.Size = UDim2.fromScale(1, 1)
+    label.Font = Enum.Font.GothamBold
+    label.TextColor3 = Color3.fromRGB(248, 249, 252)
+    label.TextSize = 12
+    label.TextWrapped = true
+    label.Text = "DPS —"
+    label.Parent = gui
+    local corner = Instance.new("UICorner")
+    corner.CornerRadius = UDim.new(0, 7)
+    corner.Parent = label
+    local stroke = Instance.new("UIStroke")
+    stroke.Color = Color3.fromRGB(215, 160, 82)
+    stroke.Transparency = 0.24
+    stroke.Thickness = 1.2
+    stroke.Parent = label
+    data = { gui = gui, label = label }
+    dpsGuis[tower] = data
+    return data
+end
+
+local function clearDpsGuis()
+    for tower, data in pairs(dpsGuis) do
+        if data.gui then pcall(function() data.gui:Destroy() end) end
+        dpsGuis[tower] = nil
+        dpsSamples[tower] = nil
+    end
+end
+
+local function valueMeansActive(valueObject)
+    if not valueObject then return false end
+    if valueObject:IsA("BoolValue") then return valueObject.Value == true end
+    if valueObject:IsA("NumberValue") or valueObject:IsA("IntValue") then
+        return tonumber(valueObject.Value) and tonumber(valueObject.Value) > 0 or false
+    end
+    if valueObject:IsA("StringValue") then
+        local value = string.lower(tostring(valueObject.Value or ""))
+        return value ~= "" and value ~= "false" and value ~= "0" and value ~= "none"
+    end
+    return true
+end
+
+local function enemyHealthData(enemy)
+    if not enemy then return nil end
+    local config = enemy:FindFirstChild("Configuration")
+    local totalLife = readNumberValue(enemy, "TotalLife")
+    if totalLife ~= nil then
+        return {
+            current = math.max(0, totalLife),
+            source = "TotalLife",
+            totalLife = totalLife,
+            health = nil,
+            health2 = readNumberValue(enemy, "Health2") or 0,
+            shield = readNumberValue(config, "Shield") or 0,
+            superShield = readNumberValue(config, "SuperShield") or 0,
+            maxHealth = nil,
+            invulnerable = valueMeansActive(enemy:FindFirstChild("Invulnerable")) or valueMeansActive(enemy:FindFirstChild("HPInvulnerable")),
+        }
+    end
+    local humanoidObject = enemy:FindFirstChild("Humanoid")
+    local health
+    local maxHealth
+    if humanoidObject then
+        if humanoidObject:IsA("Humanoid") then
+            health = tonumber(humanoidObject.Health)
+            maxHealth = tonumber(humanoidObject.MaxHealth)
+        else
+            health = readNumberValue(humanoidObject, "Health")
+            maxHealth = readNumberValue(humanoidObject, "MaxHealth")
+        end
+    end
+    if health == nil then health = readNumberValue(config, "Health") or readNumberValue(enemy, "Health") end
+    if health == nil then return nil end
+    local health2 = math.max(0, readNumberValue(enemy, "Health2") or 0)
+    local shield = math.max(0, readNumberValue(config, "Shield") or 0)
+    local superShield = math.max(0, readNumberValue(config, "SuperShield") or 0)
+    return {
+        current = math.max(0, health) + health2 + shield + superShield,
+        source = "Health fallback",
+        totalLife = nil,
+        health = health,
+        health2 = health2,
+        shield = shield,
+        superShield = superShield,
+        maxHealth = maxHealth,
+        invulnerable = valueMeansActive(enemy:FindFirstChild("Invulnerable")) or valueMeansActive(enemy:FindFirstChild("HPInvulnerable")),
+    }
+end
+local function enemyHealth(enemy)
+    local data = enemyHealthData(enemy)
+    return data and data.current or nil
+end
+
+local function setKillInfo(text)
+    pcall(function()
+        if killInfoLabel and type(killInfoLabel.SetText) == "function" then
+            killInfoLabel:SetText(text)
+        elseif Options.CTDIGKillInfo and type(Options.CTDIGKillInfo.SetText) == "function" then

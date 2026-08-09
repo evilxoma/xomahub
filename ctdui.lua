@@ -1,8 +1,18 @@
 -- XOMA / CTDIG bootstrap
--- Build: PASS9-PREGAME-READY-V19
--- Starts voting preflight immediately, then loads the stable core + patches.
+-- Build: PASS10-UNIFIED-PLAYER-V20
+-- Reuses an already-loaded XOMA session so strategy files can be executed
+-- directly by the Player without recursively rebuilding/cleaning the hub.
 
 local environment = typeof(getgenv) == "function" and getgenv() or _G
+local existingSession = environment.CTDIG_SESSION
+
+if type(existingSession) == "table"
+    and existingSession.alive == true
+    and type(existingSession.XOMA) == "table"
+    and type(existingSession.XOMA.Run) == "function"
+then
+    return existingSession.XOMA
+end
 
 -- Start Auto Ready / difficulty voting BEFORE the large hub finishes loading.
 -- New Recorder files set XOMA_AUTOEXEC_PREFLIGHT.Difficulty before this loader.

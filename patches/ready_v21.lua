@@ -1,18 +1,16 @@
 -- XOMA pre-game Ready / Difficulty patch
--- Build: PASS15-HIDDEN-CONNECTION-V25
--- Runtime closure scans show that Ready and every difficulty button each have
--- two MouseButton1Down connections, while only the cosmetic second connection
--- exposes a Lua Function. The first connection is therefore handled in another
--- / protected Luau state. Prefer connection:Defer() so that hidden connection
--- runs in its own state. Only if that cannot produce replicated confirmation do
--- we fall back to a coordinate-only VirtualInputManager Mouse1 event. We never
--- move the cursor, send keyboard input, or use VirtualUser.
+-- Build: PASS16-SERVER-VOTE-CONFIRM-V26
+-- Ready and difficulty use authoritative replicated Voting state for confirmation.
+-- Runtime scans show the real voting connection is hidden while the exposed
+-- second MouseButton1Down connection is cosmetic. Prefer the hidden connection
+-- in its own state; fall back to a coordinate-only VirtualInputManager Mouse1
+-- event. Never move the cursor, send keyboard input, or use VirtualUser.
 
 local environment = typeof(getgenv) == "function" and getgenv() or _G
 local session = environment.CTDIG_SESSION
 
 if type(session) ~= "table" or type(session.auto) ~= "table" then
-    error("XOMA V25 ready patch: CTDIG session is unavailable")
+    error("XOMA V26 ready patch: CTDIG session is unavailable")
 end
 
 local Players = game:GetService("Players")
@@ -36,15 +34,18 @@ local function buttonCenter(button)
     return button.AbsolutePosition + (button.AbsoluteSize / 2)
 end
 
+local function difficultyConfirmedName(difficulty)
+    local voting = Workspace:FindFirstChild("Voting")
+    local votes = voting and voting:FindFirstChild("DifficultyVotes")
+    local folder = votes and votes:FindFirstChild(tostring(difficulty))
+    return folder and player and folder:FindFirstChild(player.Name) ~= nil or false
+end
+
 local function difficultyConfirmed(button)
     if not button or not button.Parent or button.Parent.Name ~= "DifficultyHolder" then
         return false
     end
-
-    local voting = Workspace:FindFirstChild("Voting")
-    local votes = voting and voting:FindFirstChild("DifficultyVotes")
-    local folder = votes and votes:FindFirstChild(button.Name)
-    return folder and player and folder:FindFirstChild(player.Name) ~= nil or false
+    return difficultyConfirmedName(button.Name)
 end
 
 local function buttonConfirmed(button)
@@ -80,8 +81,6 @@ local function shouldTreatAsHidden(connection)
     local foreign = safeConnectionField(connection, "ForeignState")
     local luaConnection = safeConnectionField(connection, "LuaConnection")
 
-    -- The runtime scan's real voting connection is the one whose Function is
-    -- unavailable. ForeignState/LuaConnection are executor-specific hints only.
     if fn == nil then
         return true
     end
@@ -122,8 +121,6 @@ local function deferHiddenMouseDown(button)
                 end)
             end
 
-            -- Some executors expose Fire but not Defer. Keep it as a secondary
-            -- connection-state fallback; no synthetic user input is produced.
             if not fired then
                 local fire = safeConnectionField(connection, "Fire")
                 if type(fire) == "function" then
@@ -134,7 +131,6 @@ local function deferHiddenMouseDown(button)
             end
 
             if fired then
-                -- Allow the hidden callback's server request to replicate back.
                 local deadline = os.clock() + 0.35
                 repeat
                     if buttonConfirmed(button) then
@@ -265,7 +261,7 @@ function session.auto.autoReadyVoting(timeout)
     while session.alive and os.clock() < deadline do
         if waitingDone.Value == true then
             print(
-                "[XOMA V25] Ready Up confirmed after "
+                "[XOMA V26] Ready Up confirmed after "
                     .. tostring(attempts) .. " attempts"
             )
             return true
@@ -275,7 +271,7 @@ function session.auto.autoReadyVoting(timeout)
             attempts = attempts + 1
             local okClick, detail = session.auto.clickGuiButton(readyButton)
             print(
-                "[XOMA V25] Ready Up attempt " .. tostring(attempts)
+                "[XOMA V26] Ready Up attempt " .. tostring(attempts)
                     .. " | ok=" .. tostring(okClick)
                     .. " | " .. tostring(detail)
             )
@@ -284,7 +280,6 @@ function session.auto.autoReadyVoting(timeout)
                 return true
             end
 
-            -- Avoid the V22/V23 callback spam.
             nextAttempt = os.clock() + 0.9
         end
 
@@ -296,5 +291,96 @@ function session.auto.autoReadyVoting(timeout)
             .. " | last=" .. tostring(session.auto.lastGuiClickMethod)
 end
 
-session.readyBuild = "PASS15-HIDDEN-CONNECTION-V25"
+-- Override V19's difficulty voter. The supplied full saves prove that
+-- Countdown.ButtonsReady is not a reliable gate: the authoritative success state
+-- is Workspace.Voting.DifficultyVotes.<Difficulty>.<PlayerName>. Do not wait on
+-- ButtonsReady; wait for the actual button to exist/be visible, click it, and
+-- confirm only from the replicated vote folder.
+function session.auto.autoSelectDifficulty(macro, timeout)
+    local voting = Workspace:FindFirstChild("Voting") or Workspace:WaitForChild("Voting", 10)
+    if not voting then
+        return true
+    end
+
+    local wanted, explicit = session.auto.strategyDifficulty(macro)
+    if difficultyConfirmedName(wanted) then
+        return true
+    end
+
+    local gui = player and (
+        player:FindFirstChildOfClass("PlayerGui")
+        or player:WaitForChild("PlayerGui", 8)
+    )
+    local votingGui = gui and (
+        gui:FindFirstChild("VotingGui")
+        or gui:WaitForChild("VotingGui", 8)
+    )
+    if not votingGui then
+        return false, "VotingGui missing"
+    end
+
+    local startValue = voting:FindFirstChild("Start")
+    local difficultyValue = Workspace:FindFirstChild("Difficulty")
+    local deadline = os.clock() + (tonumber(timeout) or 15)
+    local attempts = 0
+    local nextAttempt = 0
+
+    while session.alive and os.clock() < deadline do
+        if difficultyConfirmedName(wanted) then
+            print(
+                "[XOMA V26] Difficulty " .. tostring(wanted)
+                    .. " confirmed after " .. tostring(attempts) .. " attempts"
+            )
+            return true
+        end
+
+        if startValue and startValue.Value == true then
+            local current = difficultyValue and tostring(difficultyValue.Value) or ""
+            if not explicit or current == wanted then
+                return true
+            end
+            return false,
+                "voting closed on " .. tostring(current)
+                    .. ", wanted " .. tostring(wanted)
+        end
+
+        local holder = votingGui:FindFirstChild("DifficultyHolder")
+        local button = holder and holder:FindFirstChild(wanted)
+
+        if button
+            and button:IsA("GuiButton")
+            and button.Visible
+            and button.Selectable ~= false
+            and os.clock() >= nextAttempt
+        then
+            attempts = attempts + 1
+            local okClick, detail = session.auto.clickGuiButton(button)
+            print(
+                "[XOMA V26] Difficulty " .. tostring(wanted)
+                    .. " attempt " .. tostring(attempts)
+                    .. " | ok=" .. tostring(okClick)
+                    .. " | " .. tostring(detail)
+            )
+
+            if difficultyConfirmedName(wanted) then
+                return true
+            end
+
+            nextAttempt = os.clock() + 0.9
+        end
+
+        task.wait(0.06)
+    end
+
+    if difficultyConfirmedName(wanted) then
+        return true
+    end
+
+    return false,
+        "difficulty vote was not confirmed: " .. tostring(wanted)
+            .. " | attempts=" .. tostring(attempts)
+            .. " | last=" .. tostring(session.auto.lastGuiClickMethod)
+end
+
+session.readyBuild = "PASS16-SERVER-VOTE-CONFIRM-V26"
 return session.XOMA

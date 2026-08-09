@@ -1,6 +1,6 @@
 -- XOMA / CTDIG bootstrap
--- Build: PASS7-AUTOEXEC-V17
--- Base core stays on the stable V16 chunks; V17 applies a small AutoExec patch.
+-- Build: PASS8-RECORDER-SELL-RACE-V18
+-- Base core includes the Recorder Sell-race fix; the stable V17 AutoExec patch is unchanged.
 -- Strategy syntax remains unchanged: XOMA:Place / XOMA:Upgrade / ... / XOMA:Run.
 
 local BASE = "https://raw.githubusercontent.com/evilxoma/xomahub/refs/heads/main/src/"

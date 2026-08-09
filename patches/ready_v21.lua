@@ -1,16 +1,18 @@
--- XOMA pre-game Ready / Difficulty patch
--- Build: PASS16-SERVER-VOTE-CONFIRM-V26
+-- XOMA pre-game Ready / Difficulty / W0 patch
+-- Build: PASS17-W0-IN-READY-V27
 -- Ready and difficulty use authoritative replicated Voting state for confirmation.
 -- Runtime scans show the real voting connection is hidden while the exposed
 -- second MouseButton1Down connection is cosmetic. Prefer the hidden connection
 -- in its own state; fall back to a coordinate-only VirtualInputManager Mouse1
 -- event. Never move the cursor, send keyboard input, or use VirtualUser.
+-- W0 actions begin immediately after Ready + Difficulty confirmation, while the
+-- voting/countdown phase is still active, matching how Recorder labels pre-wave actions.
 
 local environment = typeof(getgenv) == "function" and getgenv() or _G
 local session = environment.CTDIG_SESSION
 
 if type(session) ~= "table" or type(session.auto) ~= "table" then
-    error("XOMA V26 ready patch: CTDIG session is unavailable")
+    error("XOMA V27 ready patch: CTDIG session is unavailable")
 end
 
 local Players = game:GetService("Players")
@@ -174,7 +176,6 @@ local function sendVimMouse1(button)
 
     local center = buttonCenter(button)
     local ok, err = pcall(function()
-        -- No SendMouseMoveEvent: visible cursor/camera never gets repositioned.
         vim:SendMouseButtonEvent(center.X, center.Y, 0, true, game, 0)
         task.wait(0.025)
         vim:SendMouseButtonEvent(center.X, center.Y, 0, false, game, 0)
@@ -210,14 +211,12 @@ function session.auto.clickGuiButton(button)
         return true, session.auto.lastGuiClickMethod
     end
 
-    -- Primary path: execute the hidden first connection in its native state.
     local directOk, directDetail = deferHiddenMouseDown(button)
     if directOk or buttonConfirmed(button) then
         session.auto.lastGuiClickMethod = directDetail
         return true, directDetail
     end
 
-    -- Fallback only. Still no mouse movement / keyboard / VirtualUser.
     local vimOk, vimDetail = sendVimMouse1(button)
     local detail = tostring(directDetail) .. " | " .. tostring(vimDetail)
     session.auto.lastGuiClickMethod = detail
@@ -261,7 +260,7 @@ function session.auto.autoReadyVoting(timeout)
     while session.alive and os.clock() < deadline do
         if waitingDone.Value == true then
             print(
-                "[XOMA V26] Ready Up confirmed after "
+                "[XOMA V27] Ready Up confirmed after "
                     .. tostring(attempts) .. " attempts"
             )
             return true
@@ -271,7 +270,7 @@ function session.auto.autoReadyVoting(timeout)
             attempts = attempts + 1
             local okClick, detail = session.auto.clickGuiButton(readyButton)
             print(
-                "[XOMA V26] Ready Up attempt " .. tostring(attempts)
+                "[XOMA V27] Ready Up attempt " .. tostring(attempts)
                     .. " | ok=" .. tostring(okClick)
                     .. " | " .. tostring(detail)
             )
@@ -291,11 +290,6 @@ function session.auto.autoReadyVoting(timeout)
             .. " | last=" .. tostring(session.auto.lastGuiClickMethod)
 end
 
--- Override V19's difficulty voter. The supplied full saves prove that
--- Countdown.ButtonsReady is not a reliable gate: the authoritative success state
--- is Workspace.Voting.DifficultyVotes.<Difficulty>.<PlayerName>. Do not wait on
--- ButtonsReady; wait for the actual button to exist/be visible, click it, and
--- confirm only from the replicated vote folder.
 function session.auto.autoSelectDifficulty(macro, timeout)
     local voting = Workspace:FindFirstChild("Voting") or Workspace:WaitForChild("Voting", 10)
     if not voting then
@@ -328,7 +322,7 @@ function session.auto.autoSelectDifficulty(macro, timeout)
     while session.alive and os.clock() < deadline do
         if difficultyConfirmedName(wanted) then
             print(
-                "[XOMA V26] Difficulty " .. tostring(wanted)
+                "[XOMA V27] Difficulty " .. tostring(wanted)
                     .. " confirmed after " .. tostring(attempts) .. " attempts"
             )
             return true
@@ -356,7 +350,7 @@ function session.auto.autoSelectDifficulty(macro, timeout)
             attempts = attempts + 1
             local okClick, detail = session.auto.clickGuiButton(button)
             print(
-                "[XOMA V26] Difficulty " .. tostring(wanted)
+                "[XOMA V27] Difficulty " .. tostring(wanted)
                     .. " attempt " .. tostring(attempts)
                     .. " | ok=" .. tostring(okClick)
                     .. " | " .. tostring(detail)
@@ -382,5 +376,29 @@ function session.auto.autoSelectDifficulty(macro, timeout)
             .. " | last=" .. tostring(session.auto.lastGuiClickMethod)
 end
 
-session.readyBuild = "PASS16-SERVER-VOTE-CONFIRM-V26"
+-- This override intentionally lives in the ready patch because player_v20 already
+-- fetches this file in sessions where an older cached ctdui.lua may not know about
+-- the standalone W0 patch. W0 means the voting/countdown pre-wave phase.
+function session.auto.waitForPregameFinished(macro, timeout)
+    local voting = Workspace:FindFirstChild("Voting")
+    if not voting then
+        return true
+    end
+
+    local readyOk, readyError = session.auto.autoReadyVoting(12)
+    if not readyOk then
+        print("[XOMA V27] Auto Ready warning: " .. tostring(readyError))
+    end
+
+    local voteOk, voteError = session.auto.autoSelectDifficulty(macro, 12)
+    if not voteOk then
+        return false, voteError
+    end
+
+    print("[XOMA V27] Ready + difficulty confirmed | starting W0 replay during pre-game")
+    return true
+end
+
+session.readyBuild = "PASS17-W0-IN-READY-V27"
+session.w0Build = "PASS17-W0-IN-READY-V27"
 return session.XOMA

@@ -1,7 +1,8 @@
 -- XOMA pre-game Ready Up signal patch
--- Build: PASS11-READY-SIGNAL-V21
--- game2's WaitingRoom button is driven from MouseButton1Down. Do not treat a
--- successful VirtualInputManager pcall as proof that the GUI accepted a click.
+-- Build: PASS12-READY-NOINPUT-V22
+-- Never synthesizes mouse/keyboard input. Ready/difficulty voting is driven only
+-- through the button's existing Roblox signal connections, so player control is
+-- never moved or captured by the macro.
 
 local environment = typeof(getgenv) == "function" and getgenv() or _G
 local session = environment.CTDIG_SESSION
@@ -9,7 +10,7 @@ local session = environment.CTDIG_SESSION
 if type(session) ~= "table"
     or type(session.auto) ~= "table"
 then
-    error("XOMA V21 ready patch: CTDIG session is unavailable")
+    error("XOMA V22 ready patch: CTDIG session is unavailable")
 end
 
 local Workspace = game:GetService("Workspace")
@@ -20,48 +21,85 @@ local function executorFunction(name)
     return type(value) == "function" and value or nil
 end
 
-local function signalFire(button, signalName, center)
-    local signal = button and button[signalName]
-    if not signal then
+local function fireConnection(connection, ...)
+    if not connection then
         return false
     end
 
-    local firesignalFn = executorFunction("firesignal")
-    if firesignalFn then
-        local ok
-        if signalName == "MouseButton1Down" or signalName == "MouseButton1Up" or signalName == "MouseButton1Click" then
-            ok = pcall(firesignalFn, signal, center.X, center.Y)
-        else
-            ok = pcall(firesignalFn, signal)
-        end
-        if ok then
-            return true
-        end
+    local enabledOk, enabled = pcall(function()
+        return connection.Enabled
+    end)
+    if enabledOk and enabled == false then
+        return false
     end
 
+    if type(connection.Fire) == "function" then
+        return pcall(connection.Fire, connection, ...)
+    end
+
+    if type(connection.Function) == "function" then
+        return pcall(connection.Function, ...)
+    end
+
+    return false
+end
+
+local function directSignal(button, signalName, center)
+    local signal = button and button[signalName]
+    if not signal then
+        return false, signalName .. ":missing"
+    end
+
+    -- Prefer the real connected callbacks. The previous build returned early
+    -- after firesignal() merely because pcall succeeded, which could be a false
+    -- positive and prevented us from reaching the actual connection objects.
     local getconnectionsFn = executorFunction("getconnections")
     if getconnectionsFn then
         local ok, connections = pcall(getconnectionsFn, signal)
         if ok and type(connections) == "table" then
             local fired = 0
             for _, connection in ipairs(connections) do
-                local didFire = false
-                if type(connection.Fire) == "function" then
-                    didFire = pcall(connection.Fire, connection, center.X, center.Y)
-                elseif type(connection.Function) == "function" then
-                    didFire = pcall(connection.Function, center.X, center.Y)
+                local didFire
+                if signalName == "MouseButton1Down"
+                    or signalName == "MouseButton1Up"
+                    or signalName == "MouseButton1Click"
+                then
+                    didFire = fireConnection(connection, center.X, center.Y)
+                else
+                    didFire = fireConnection(connection)
                 end
+
                 if didFire then
                     fired = fired + 1
                 end
             end
+
             if fired > 0 then
-                return true
+                return true, signalName .. ":connections=" .. tostring(fired)
             end
         end
     end
 
-    return false
+    -- firesignal is still input-free: it does not move the user's mouse. Keep it
+    -- as a compatibility fallback for executors that do not expose connections.
+    local firesignalFn = executorFunction("firesignal")
+    if firesignalFn then
+        local ok
+        if signalName == "MouseButton1Down"
+            or signalName == "MouseButton1Up"
+            or signalName == "MouseButton1Click"
+        then
+            ok = pcall(firesignalFn, signal, center.X, center.Y)
+        else
+            ok = pcall(firesignalFn, signal)
+        end
+
+        if ok then
+            return true, signalName .. ":firesignal"
+        end
+    end
+
+    return false, signalName .. ":unavailable"
 end
 
 function session.auto.clickGuiButton(button)
@@ -76,60 +114,45 @@ function session.auto.clickGuiButton(button)
     local center = button.AbsolutePosition + (button.AbsoluteSize / 2)
     local cycle = (clickCycles[button] or 0) + 1
     clickCycles[button] = cycle
-    local mode = ((cycle - 1) % 5) + 1
 
-    -- WaitingRoom in the supplied game2 binds MouseButton1Down directly.
-    if mode == 1 then
-        if signalFire(button, "MouseButton1Down", center) then
-            session.auto.lastGuiClickMethod = "MouseButton1Down"
-            return true, session.auto.lastGuiClickMethod
-        end
-    elseif mode == 2 then
-        if signalFire(button, "Activated", center) then
-            session.auto.lastGuiClickMethod = "Activated"
-            return true, session.auto.lastGuiClickMethod
-        end
-    elseif mode == 3 then
-        if signalFire(button, "MouseButton1Click", center) then
-            session.auto.lastGuiClickMethod = "MouseButton1Click"
-            return true, session.auto.lastGuiClickMethod
-        end
-    elseif mode == 4 then
-        local vimOk, vim = pcall(game.GetService, game, "VirtualInputManager")
-        if vimOk and vim then
-            local ok = pcall(function()
-                vim:SendMouseButtonEvent(center.X, center.Y, 0, true, game, 0)
-                task.wait(0.03)
-                vim:SendMouseButtonEvent(center.X, center.Y, 0, false, game, 0)
-            end)
-            if ok then
-                session.auto.lastGuiClickMethod = "VirtualInputManager"
-                return true, session.auto.lastGuiClickMethod
-            end
-        end
-    else
-        local vuOk, virtualUser = pcall(game.GetService, game, "VirtualUser")
-        if vuOk and virtualUser then
-            local ok = pcall(function()
-                local camera = Workspace.CurrentCamera
-                local cf = camera and camera.CFrame or CFrame.new()
-                virtualUser:Button1Down(center, cf)
-                task.wait(0.03)
-                virtualUser:Button1Up(center, cf)
-            end)
-            if ok then
-                session.auto.lastGuiClickMethod = "VirtualUser"
-                return true, session.auto.lastGuiClickMethod
-            end
+    -- These are all direct signal invocations. VirtualInputManager/VirtualUser
+    -- are intentionally not used anywhere in this patch.
+    local modes = {
+        "Activated",
+        "MouseButton1Click",
+        "MouseButton1Down",
+    }
+    local signalName = modes[((cycle - 1) % #modes) + 1]
+
+    -- MouseButton1Down in game2 also has a cosmetic press animation. Restore its
+    -- visual position immediately so a direct callback cannot leave it depressed.
+    local oldPosition
+    local oldDarkPosition
+    local dark = button:FindFirstChild("BackgroundDark")
+    if signalName == "MouseButton1Down" then
+        oldPosition = button.Position
+        if dark and dark:IsA("GuiObject") then
+            oldDarkPosition = dark.Position
         end
     end
 
-    session.auto.lastGuiClickMethod = "method " .. tostring(mode) .. " unavailable"
-    return false, session.auto.lastGuiClickMethod
+    local ok, detail = directSignal(button, signalName, center)
+
+    if signalName == "MouseButton1Down" then
+        pcall(function()
+            button.Position = oldPosition
+            if dark and oldDarkPosition then
+                dark.Position = oldDarkPosition
+            end
+        end)
+    end
+
+    session.auto.lastGuiClickMethod = detail
+    return ok, detail
 end
 
--- Override only Ready Up. Confirmation comes exclusively from WaitingRoomDone,
--- so false-positive synthetic clicks cannot advance the strategy.
+-- Confirmation comes exclusively from the replicated WaitingRoomDone value.
+-- A direct callback returning successfully is never treated as proof by itself.
 function session.auto.autoReadyVoting(timeout)
     local voting = Workspace:FindFirstChild("Voting") or Workspace:WaitForChild("Voting", 10)
     if not voting then
@@ -160,18 +183,18 @@ function session.auto.autoReadyVoting(timeout)
 
     while session.alive and os.clock() < deadline do
         if waitingDone.Value == true then
-            print("[XOMA V21] Ready Up confirmed after " .. tostring(attempts) .. " attempts")
+            print("[XOMA V22] Ready Up confirmed after " .. tostring(attempts) .. " attempts")
             return true
         end
 
-        if readyButton.Visible and os.clock() - lastClick >= 0.45 then
+        if readyButton.Visible and os.clock() - lastClick >= 0.35 then
             attempts = attempts + 1
             local _, method = session.auto.clickGuiButton(readyButton)
-            print("[XOMA V21] Ready Up attempt " .. tostring(attempts) .. " via " .. tostring(method))
+            print("[XOMA V22] Ready Up attempt " .. tostring(attempts) .. " via " .. tostring(method))
             lastClick = os.clock()
         end
 
-        task.wait(0.08)
+        task.wait(0.06)
     end
 
     return waitingDone.Value == true,
@@ -179,5 +202,5 @@ function session.auto.autoReadyVoting(timeout)
             .. " | last=" .. tostring(session.auto.lastGuiClickMethod)
 end
 
-session.readyBuild = "PASS11-READY-SIGNAL-V21"
+session.readyBuild = "PASS12-READY-NOINPUT-V22"
 return session.XOMA

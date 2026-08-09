@@ -1,0 +1,500 @@
+local CTDIG_BUILD_AUTORUN = false
+if not game:IsLoaded() then
+    game.Loaded:Wait()
+end
+
+local environment = typeof(getgenv) == "function" and getgenv() or _G
+local previousSession = environment.CTDIG_SESSION
+local previousStacker = environment.CTDIG_STACKER -- legacy cleanup only
+
+if type(previousSession) == "table" and type(previousSession.cleanup) == "function" then
+    local cleaned, cleanupError = pcall(previousSession.cleanup)
+    if not cleaned then
+        warn("[CTDIG] Previous session cleanup failed: " .. tostring(cleanupError))
+    end
+end
+
+if type(previousStacker) == "table" then
+    if type(previousStacker.cleanup) == "function" then
+        local cleaned, cleanupError = pcall(previousStacker.cleanup)
+        if not cleaned then
+            warn("[CTDIG] Legacy placement cleanup failed: " .. tostring(cleanupError))
+        end
+    end
+
+    -- Legacy cleanup only: restore wrappers left by an older CTDIG build.
+    -- V12 itself has no Stacker feature or placement patch.
+    if type(previousStacker.module) == "table"
+        and type(previousStacker.original) == "function"
+        and previousStacker.module.CheckTowerOverlaps == previousStacker.wrapper then
+        previousStacker.module.CheckTowerOverlaps = previousStacker.original
+    end
+
+    if type(previousStacker.module) == "table"
+        and type(previousStacker.originalMouseIgnores) == "function"
+        and previousStacker.module.getplacementmouseignores == previousStacker.mouseWrapper then
+        previousStacker.module.getplacementmouseignores = previousStacker.originalMouseIgnores
+    end
+end
+environment.CTDIG_STACKER = nil
+
+local session = { alive = true }
+environment.CTDIG_SESSION = session
+session.combatBuild = "PASS6-SESSION-XOMA-V16"
+session.replayBuild = "PASS6-SESSION-XOMA-V16"
+session.combatTowerDpsEnabled = true
+session.combatKillPreviewEnabled = true
+
+local Players = game:GetService("Players")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local StarterGui = game:GetService("StarterGui")
+local Workspace = game:GetService("Workspace")
+local UserInputService = game:GetService("UserInputService")
+
+local player = Players.LocalPlayer
+local playerGui = player:WaitForChild("PlayerGui", 15)
+local remotes = ReplicatedStorage:WaitForChild("Remotes", 15)
+
+if not playerGui or not remotes then
+    error("CTDIG: PlayerGui or ReplicatedStorage.Remotes was not available after 15 seconds")
+end
+
+local Library = loadstring(game:HttpGet("https://raw.githubusercontent.com/deividcomsono/Obsidian/main/Library.lua"))()
+local Options = Library.Options
+local Toggles = Library.Toggles
+
+-- Obsidian's own SaveManager is used for CTDIG configs. The manager is kept
+-- on the session table so this already-large chunk does not waste top-level
+-- local slots (Luau/Lua chunks have a local-variable limit).
+if typeof(isfolder) == "function"
+    and typeof(isfile) == "function"
+    and typeof(listfiles) == "function"
+    and typeof(makefolder) == "function"
+    and typeof(readfile) == "function"
+    and typeof(writefile) == "function"
+    and typeof(delfile) == "function"
+then
+    local ok, manager = pcall(function()
+        return loadstring(game:HttpGet("https://raw.githubusercontent.com/deividcomsono/Obsidian/main/addons/SaveManager.lua"))()
+    end)
+    if ok and type(manager) == "table" then
+        session.saveManager = manager
+        session.saveManager:SetLibrary(Library)
+        session.saveManager:SetFolder("CTDIG")
+        session.saveManager:SetSubFolder("configs")
+    else
+        warn("[CTDIG] SaveManager unavailable: " .. tostring(manager))
+    end
+end
+
+session.cleanup = function()
+    if not session.alive then
+        return
+    end
+
+    session.alive = false
+    if Library and type(Library.Unload) == "function" then
+        pcall(function()
+            Library:Unload()
+        end)
+    end
+    if environment.CTDIG_SESSION == session then
+        environment.CTDIG_SESSION = nil
+    end
+end
+
+local Window = Library:CreateWindow({
+    Title = "CTDIG",
+    Footer = "Macro Recorder",
+    NotifySide = "Right",
+    AutoShow = true,
+})
+
+local MacroTab = Window:AddTab("Macro", "circle-play")
+local LoggerTab = Window:AddTab("Logger", "logs")
+local ToolsTab = Window:AddTab("Tools", "wrench")
+session.webhookTab = Window:AddTab("Webhook", "webhook")
+session.configTab = Window:AddTab("Configs", "folder-cog")
+local RecorderBox = MacroTab:AddLeftGroupbox("Recorder")
+local ReplayBox = MacroTab:AddRightGroupbox("Replay")
+local LoggerBox = LoggerTab:AddLeftGroupbox("Actions")
+local PlacementBox = ToolsTab:AddLeftGroupbox("Placement")
+local CombatBox = ToolsTab:AddRightGroupbox("Combat Visuals")
+session.webhookBox = session.webhookTab:AddLeftGroupbox("Discord Webhook")
+
+local statusLabel = RecorderBox:AddLabel("CTDIGStatus", {
+    Text = "Status: Idle",
+    DoesWrap = true,
+})
+
+local loggerLabel = LoggerBox:AddLabel("CTDIGLog", {
+    Text = "Logger inactive. Start Recorder.",
+    DoesWrap = true,
+})
+
+local replayStatusLabel = ReplayBox:AddLabel("CTDIGReplayStatus", {
+    Text = "Replay: idle",
+    DoesWrap = true,
+})
+
+local nativeAutoSkipSetting = player:FindFirstChild("PlayerData")
+    and player.PlayerData:FindFirstChild("Settings")
+    and player.PlayerData.Settings:FindFirstChild("AutoSkip")
+
+RecorderBox:AddToggle("CTDIGAutoSkip", {
+    Text = "Auto Skip",
+    Default = nativeAutoSkipSetting and nativeAutoSkipSetting.Value == true or false,
+    Tooltip = "Uses the game native AutoSkip setting.",
+})
+
+PlacementBox:AddToggle("CTDIGRangePreview", {
+    Text = "Range Preview",
+    Default = true,
+    Tooltip = "Keeps the game's exact current range and adds perk/map/surface-adjusted upgrade range previews.",
+})
+
+local rangeInfoLabel = PlacementBox:AddLabel("CTDIGRangeInfo", {
+    Text = "Range Preview: select a unit",
+    DoesWrap = true,
+})
+
+ReplayBox:AddToggle("CTDIGAutoRetry", {
+    Text = "Auto Retry",
+    Default = false,
+    Tooltip = "After Triumph/Defeat, automatically presses the game's real Restart button.",
+})
+
+ReplayBox:AddToggle("CTDIGAutoBackLobby", {
+    Text = "Auto Back to Lobby",
+    Default = false,
+    Tooltip = "After Triumph/Defeat, automatically presses the game's real Exit to Lobby button.",
+})
+
+local endActionLabel = ReplayBox:AddLabel("CTDIGEndAction", {
+    Text = "End action: OFF",
+    DoesWrap = true,
+})
+
+CombatBox:AddToggle("CTDIGTowerDPS", {
+    Text = "Tower DPS",
+    Default = true,
+    Tooltip = "Shows calculated DPS above placed towers.",
+    Callback = function(value)
+        session.combatTowerDpsEnabled = value == true
+    end,
+})
+
+CombatBox:AddToggle("CTDIGKillPreview", {
+    Text = "Kill Preview",
+    Default = true,
+    Tooltip = "Shows current enemy HP and predicts discrete shots before enemies leave all of your towers' ranges. Green = safe, red = predicted leak.",
+    Callback = function(value)
+        session.combatKillPreviewEnabled = value == true
+    end,
+})
+
+local killInfoLabel = CombatBox:AddLabel("CTDIGKillInfo", {
+    Text = "Kill Preview: waiting for enemies",
+    DoesWrap = true,
+})
+
+local combatDiagLabel = CombatBox:AddLabel("CTDIGCombatDiag", {
+    Text = "Combat: DPS waiting | Predict waiting",
+    DoesWrap = true,
+})
+
+session.webhookBox:AddInput("CTDIGWebhookURL", {
+    Default = "",
+    Numeric = false,
+    Finished = true,
+    ClearTextOnFocus = false,
+    Text = "Webhook URL",
+    Tooltip = "Discord webhook URL. Saved with your CTDIG config.",
+    Placeholder = "https://discord.com/api/webhooks/...",
+    MaxLength = 500,
+})
+
+session.webhookBox:AddToggle("CTDIGWebhookEnabled", {
+    Text = "Enable Webhook",
+    Default = false,
+    Tooltip = "Send one result message when the match ends.",
+})
+
+session.webhookBox:AddToggle("CTDIGWebhookVictory", {
+    Text = "Send Victory",
+    Default = true,
+})
+
+session.webhookBox:AddToggle("CTDIGWebhookDefeat", {
+    Text = "Send Defeat",
+    Default = true,
+})
+
+session.webhookBox:AddToggle("CTDIGWebhookRewards", {
+    Text = "Include Other Rewards",
+    Default = true,
+    Tooltip = "Coins/EXP farm stats are always shown. This toggle adds other non-zero rewards too.",
+})
+
+session.webhookBox:AddInput("CTDIGWebhookMention", {
+    Default = "",
+    Numeric = false,
+    Finished = true,
+    ClearTextOnFocus = false,
+    Text = "Discord User ID (optional)",
+    Tooltip = "If set, the webhook mentions this Discord user on match result.",
+    Placeholder = "123456789012345678",
+    MaxLength = 32,
+})
+
+session.webhookStatusLabel = session.webhookBox:AddLabel("CTDIGWebhookStatus", {
+    Text = "Webhook: disabled",
+    DoesWrap = true,
+})
+
+session.webhookBox:AddButton({
+    Text = "Test Webhook",
+    Func = function()
+        if type(session.sendWebhook) ~= "function" then
+            pcall(function()
+                session.webhookStatusLabel:SetText("Webhook: not initialized yet")
+            end)
+            return
+        end
+
+        session.sendWebhook("Test", true)
+    end,
+})
+
+if session.saveManager then
+    session.saveManager:BuildConfigSection(session.configTab, "folder-cog")
+else
+    local configInfo = session.configTab:AddLeftGroupbox("Configuration")
+    configInfo:AddLabel("Configs unavailable: executor file API is missing.", true)
+end
+
+local recording = false
+local replaying = false
+local replayTaskRunning = false
+local actions = {}
+local ids = {}
+local nextId = 1
+local macroMap = ""
+local macroDeck = {}
+local towerState = {}
+local baselineTowers = setmetatable({}, { __mode = "k" })
+local placementAttempt
+local recentPlacement
+local connections = {}
+local towerConnections = {}
+local logLines = {}
+local logHead = 1
+local logCount = 0
+local ctdModule
+local resolvedUnits = {}
+local recorderState = "idle"
+local lastRecorderStatusText
+local lastReplayStatusText
+local replayStopRequested = false
+local recordedSkipWaves = {}
+local pendingSkipWave
+local pendingSkipAt = 0
+local lastSkipConfirmationWave
+local lastSkipConfirmationAt = 0
+local placementConfiguration
+local placementRecorderBound = false
+local placementRecorderBinding = false
+local autoSkipChanging = false
+local endActionChanging = false
+session.endAction = {
+    key = nil,
+    attempts = 0,
+    nextAttempt = 0,
+    startedAt = 0,
+    busy = false,
+    confirmed = false,
+    requested = false,
+    requestedAt = 0,
+    requestText = nil,
+}
+session.webhook = {
+    endActive = false,
+    endResult = nil,
+    endSeenAt = 0,
+    sent = false,
+    busy = false,
+    attempts = 0,
+    nextAttempt = 0,
+    lastStatus = nil,
+    accounted = false,
+}
+environment.CTDIG_FARM_SESSION = type(environment.CTDIG_FARM_SESSION) == "table"
+    and environment.CTDIG_FARM_SESSION
+    or {
+        startedAt = os.time(),
+        runs = 0,
+        wins = 0,
+        losses = 0,
+        coins = 0,
+        exp = 0,
+        totalGameSeconds = 0,
+    }
+session.farmSession = environment.CTDIG_FARM_SESSION
+session.placementQueue = {}
+session.pendingTowerRecords = setmetatable({}, { __mode = "k" })
+session.pendingTowerActions = setmetatable({}, { __mode = "k" })
+
+local MACRO_FILE = "ctdig.lua"
+local MACRO_BACKUP_FILE = "ctdig.backup.lua"
+local MACRO_TEMP_FILE = "ctdig.__writing.lua"
+
+session.sourceBindings = {
+    towerFolders = setmetatable({}, { __mode = "k" }),
+    detects = setmetatable({}, { __mode = "k" }),
+    skipping = setmetatable({}, { __mode = "k" }),
+    gameVals = setmetatable({}, { __mode = "k" }),
+    waves = setmetatable({}, { __mode = "k" }),
+    sellButtons = setmetatable({}, { __mode = "k" }),
+    sellGuis = setmetatable({}, { __mode = "k" }),
+    upgradeButtons = setmetatable({}, { __mode = "k" }),
+    actionGuis = setmetatable({}, { __mode = "k" }),
+    hotkeysBound = false,
+}
+local rangePreviewGui
+local rangePreviewAdornee
+local rangePreviewFolder
+local rangePreviewBoundValues = setmetatable({}, { __mode = "k" })
+local rangePreviewBindingStarted = false
+local rangeNativeOriginals = setmetatable({}, { __mode = "k" })
+local dpsGuis = setmetatable({}, { __mode = "k" })
+local dpsSamples = setmetatable({}, { __mode = "k" })
+local killHighlights = setmetatable({}, { __mode = "k" })
+local killLabels = setmetatable({}, { __mode = "k" })
+local enemyMotion = setmetatable({}, { __mode = "k" })
+local lastKillPreviewUpdate = 0
+local lastRangePreviewRefresh = 0
+local lastRecorderRecoveryScan = 0
+local lastDpsVisualErrorAt = 0
+local lastKillVisualErrorAt = 0
+local combatDiagDps = "DPS waiting"
+local combatDiagPredict = "Predict waiting"
+
+
+local LOGGER_LIMIT = 25
+
+local function recorderWave()
+    local map = Workspace:FindFirstChild("Map")
+    local config = map and map:FindFirstChild("Configuration")
+    local wave = config and config:FindFirstChild("Wave")
+    return wave and tonumber(wave.Value) or 0
+end
+
+local function setLabelText(label, optionName, text)
+    if label and type(label.SetText) == "function" then
+        label:SetText(text)
+        return true
+    end
+
+    local option = Options and Options[optionName]
+    if option and type(option.SetText) == "function" then
+        option:SetText(text)
+        return true
+    end
+
+    return false
+end
+
+local function refreshCombatDiag()
+    local textValue = "Combat: " .. tostring(combatDiagDps) .. " | " .. tostring(combatDiagPredict)
+    pcall(function()
+        if combatDiagLabel and type(combatDiagLabel.SetText) == "function" then
+            combatDiagLabel:SetText(textValue)
+        elseif Options and Options.CTDIGCombatDiag and type(Options.CTDIGCombatDiag.SetText) == "function" then
+            Options.CTDIGCombatDiag:SetText(textValue)
+        end
+    end)
+end
+
+local function setCombatDiagDps(textValue)
+    combatDiagDps = tostring(textValue)
+    refreshCombatDiag()
+end
+
+local function setCombatDiagPredict(textValue)
+    combatDiagPredict = tostring(textValue)
+    refreshCombatDiag()
+end
+
+local function refreshRecorderStatus()
+    local text
+
+    if recorderState == "recording" then
+        text = string.format("Recording | Actions: %d | Wave: %d", #actions, recorderWave())
+    elseif recorderState == "saving" then
+        text = "Saving"
+    elseif recorderState == "saved" then
+        text = string.format("Saved | Actions: %d", #actions)
+    elseif recorderState == "save_failed" then
+        text = "Save failed"
+    elseif recorderState == "replaying" then
+        text = "Replaying"
+    elseif recorderState == "replay_stopped" then
+        text = "Replay stopped"
+    elseif recorderState == "replay_finished" then
+        text = "Replay finished"
+    elseif recorderState == "error" then
+        text = "Error"
+    else
+        text = "Idle"
+    end
+
+    local fullText = "Status: " .. text
+    if fullText ~= lastRecorderStatusText then
+        lastRecorderStatusText = fullText
+        setLabelText(statusLabel, "CTDIGStatus", fullText)
+    end
+end
+
+local function setRecorderState(state)
+    recorderState = state
+    refreshRecorderStatus()
+end
+
+local function setReplayStatus(text)
+    local fullText = "Replay: " .. tostring(text)
+    if fullText ~= lastReplayStatusText then
+        lastReplayStatusText = fullText
+        setLabelText(replayStatusLabel, "CTDIGReplayStatus", fullText)
+    end
+end
+
+local function notify(title, text, time)
+    local ok = pcall(function()
+        Library:Notify({
+            Title = tostring(title),
+            Description = tostring(text or ""),
+            Time = time or 3,
+        })
+    end)
+
+    if not ok then
+        pcall(function()
+            StarterGui:SetCore("SendNotification", {
+                Title = tostring(title),
+                Text = tostring(text or ""),
+                Duration = time or 3,
+            })
+        end)
+    end
+end
+
+local function renderLogger()
+    if logCount == 0 then
+        setLabelText(loggerLabel, "CTDIGLog", "Recorder active. Waiting for actions.")
+        return
+    end
+
+    local visible = {}
+    for offset = 0, logCount - 1 do
+        local index = ((logHead + offset - 1) % LOGGER_LIMIT) + 1
+        visible[#visible + 1] = logLines[index]

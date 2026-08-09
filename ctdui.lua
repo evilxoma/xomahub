@@ -1,5 +1,5 @@
 -- XOMA / CTDIG bootstrap
--- Build: PASS20-VECTOR3-STRATEGY-V30
+-- Build: PASS21-ENDSCREEN-GATE-V31
 -- Reuses an already-loaded XOMA session so strategy files can be executed
 -- directly by the Player without recursively rebuilding/cleaning the hub.
 
@@ -71,7 +71,6 @@ local coreSource = fetchParts(
     4
 )
 
--- Obsidian status widgets are non-essential and can be Plugin-capability objects.
 coreSource = coreSource:gsub(
     "label:SetText%(text%)",
     "pcall(label.SetText, label, text)",
@@ -83,9 +82,6 @@ coreSource = coreSource:gsub(
     1
 )
 
--- Saved Obsidian config invokes OnChanged callbacks through SafeCallback/RunChanged.
--- Optional combat cleanup helpers may be absent in a particular build, so do not
--- let config load die on a nil helper.
 coreSource = coreSource:gsub(
     "if not session%.combatTowerDpsEnabled then%s+session%.visuals%.clearDpsGuis%(%s*%)%s+end",
     [[if not session.combatTowerDpsEnabled then
@@ -105,10 +101,6 @@ coreSource = coreSource:gsub(
     1
 )
 
--- The live UnitPlaceScript uses CTDModule.getplacementmouseignores().Normal/Path
--- before checkcanplace(). Merge that native list into replay's downward raycast.
--- Locals stay inside the nested closure, so the giant core function's register
--- count does not grow.
 coreSource = coreSource:gsub(
     "if player%.Character then ignore%[#ignore %+ 1%] = player%.Character end%s+params%.FilterDescendantsInstances = ignore",
     [[if player.Character then ignore[#ignore + 1] = player.Character end
@@ -146,8 +138,6 @@ coreSource = coreSource:gsub(
     1
 )
 
--- Status widgets may be unavailable from executor threads. Print the exact Place
--- failure too, so a rejection is visible in F9 without relying on Obsidian text.
 coreSource = coreSource:gsub(
     "local tower, placeError = performPlace%(action%)",
     [[local tower, placeError = performPlace(action)
@@ -181,7 +171,7 @@ local XOMA = coreChunk()
 local activeSession = environment.CTDIG_SESSION
 if type(activeSession) == "table" then
     activeSession.dataModel = game
-    activeSession.bootstrapBuild = "PASS20-VECTOR3-STRATEGY-V30"
+    activeSession.bootstrapBuild = "PASS21-ENDSCREEN-GATE-V31"
 end
 
 local autoexecSource = game:HttpGet(
@@ -219,5 +209,14 @@ if not w0Chunk then
     error("XOMA V30 patch compile failed: " .. tostring(w0Error))
 end
 XOMA = w0Chunk() or XOMA
+
+local endActionSource = game:HttpGet(
+    "https://raw.githubusercontent.com/evilxoma/xomahub/refs/heads/main/patches/endaction_v31.lua"
+)
+local endActionChunk, endActionError = loadstring(endActionSource)
+if not endActionChunk then
+    error("XOMA V31 end-action patch compile failed: " .. tostring(endActionError))
+end
+XOMA = endActionChunk() or XOMA
 
 return XOMA

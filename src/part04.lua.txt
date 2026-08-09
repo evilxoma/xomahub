@@ -85,6 +85,9 @@ local function unitLevelRanges(unitName, preview, surface)
             end
 
             if range and range > 0 then
+                -- Re-run exactly the game's perk/map/surface modifier pass on a
+                -- tiny local stat container. dochecktowermodifications only needs
+                -- Name + Configuration for Range/Range2 and the placed surface.
                 if module and type(module.dochecktowermodifications) == "function" then
                     local fake = Instance.new("Folder")
                     fake.Name = unitName
@@ -157,6 +160,9 @@ local function restoreNativeRangeParts()
 end
 
 local function hideNativeRangeParts(preview)
+    -- V11 intentionally keeps the game's own current RangeViewPart visible.
+    -- It is the exact post-modification placement range and also carries the
+    -- native red/blue validity color. CTDIG only adds future upgrade rings.
     return preview
 end
 
@@ -247,6 +253,8 @@ local function makeRangeRing(folder, preview, root, radius, level, visualIndex, 
     end
 
     if not rangePart then
+        -- Exact CTDModule API is the primary path. This compact fallback keeps
+        -- the preview usable if a runtime update temporarily removes that API.
         local segments = base and 28 or 18
         local step = (2 * math.pi) / segments
         local arc = (2 * math.pi * radius) / segments
@@ -371,6 +379,8 @@ local function refreshRangePreview()
         return
     end
 
+    -- Probe the actual map surface beneath the native placement preview.
+    -- Range modifiers can depend on the placed surface.
     local surface
     do
         local params = RaycastParams.new()
@@ -393,6 +403,8 @@ local function refreshRangePreview()
 
     local entries = unitLevelRanges(unit.Name, preview, surface)
 
+    -- Native current range is authoritative, including ManualRange. The game's
+    -- UnitManager sizes MeshPart X/Z or Part Y/Z using DIAMETER = range * 2.
     local native = preview:FindFirstChild("RangeViewPart", true)
     local native2 = preview:FindFirstChild("RangeViewPart2", true)
     local nativeRadius
@@ -418,6 +430,8 @@ local function refreshRangePreview()
         and math.abs(nativeRadius - liveRange) > 0.08
 
     if manualSpecial and currentRadius and currentRadius > 0 then
+        -- ManualRange comes from placeUnitHint options and is not encoded in the
+        -- level Settings. Do not invent future ranges for that special placement.
         entries = {{
             sourceLevel = 0,
             range = currentRadius,
@@ -466,6 +480,7 @@ local function refreshRangePreview()
         or rangePreviewAdornee ~= root
         or rangePreviewFolder:GetAttribute("Signature") ~= signature
 
+    -- Keep native RangeViewPart visible; only our future rings are managed.
     hideNativeRangeParts(preview)
 
     local first = entries[1]

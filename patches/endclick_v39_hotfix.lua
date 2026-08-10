@@ -1,13 +1,12 @@
 -- XOMA Auto Retry real-button hotfix
--- Build: PASS34-AUTORETRY-REAL-RESTART-V39
--- Scope: Auto Retry only. Do not touch recorder/place/upgrade/skip/ready/difficulty.
+-- Build: PASS35-AUTORETRY-DIRECT-SIGNAL-V39
+-- Scope: Auto Retry only. Recorder/place/upgrade/skip/ready/difficulty untouched.
 --
--- The saved game moves EndFrame.RoundFrame.Restart far off-screen first and only
--- later makes it Active/Selectable and tweens it into view. The previous cascade
--- could spend many seconds trying synthetic RBXScriptSignals before reaching a
--- real input click. This watcher waits for the exact live PlayerGui button and
--- sends a virtual click at its CURRENT center first. It never moves the physical
--- OS cursor and never falls back to Return/Back to Lobby while Auto Retry owns it.
+-- PASS34 proved that the real PlayerGui.EndFrame.RoundFrame.Restart is found and
+-- that VIM input is sent, but a successful SendMouseButtonEvent only means the
+-- input packet was emitted. CoreGui (notably the developer console) can sit above
+-- PlayerGui and consume that click. PASS35 therefore drives the Restart button's
+-- own live RBXScriptSignal connections FIRST. Coordinate input is only a fallback.
 
 local environment = typeof(getgenv) == "function" and getgenv() or _G
 local session = environment.CTDIG_SESSION
@@ -17,18 +16,21 @@ if type(session) ~= "table" then
 end
 
 local Players = game:GetService("Players")
+local StarterGui = game:GetService("StarterGui")
+local GuiService = game:GetService("GuiService")
 local UserInputService = game:GetService("UserInputService")
 local Workspace = game:GetService("Workspace")
 local player = Players.LocalPlayer
 
--- Stop the PASS33 watcher so there is exactly one owner of Restart clicks.
+-- Stop all older end-click owners. Only this watcher may drive Restart.
 session.endClickWatcherSerialV39 = (tonumber(session.endClickWatcherSerialV39) or 0) + 1
 session.endClickHotfixSerialV39 = (tonumber(session.endClickHotfixSerialV39) or 0) + 1
 local watcherSerial = session.endClickHotfixSerialV39
 
 local POLL = 0.10
-local RETRY_DELAY = 0.85
-local POST_CLICK_CONFIRM = 0.70
+local METHOD_CONFIRM_WAIT = 1.15
+local NO_METHOD_DELAY = 0.15
+local METHOD_CYCLE_DELAY = 1.50
 local NEW_ROUND_RESET = 2.50
 
 local control = session.endClickRealV39
@@ -46,10 +48,16 @@ local function resetControl()
     control.acceptedAt = 0
     control.nextAttempt = 0
     control.attempts = 0
+    control.methodIndex = 1
     control.replayStopped = false
 end
 
 resetControl()
+
+local function executorFunction(name)
+    local value = rawget(environment, name) or rawget(_G, name)
+    return type(value) == "function" and value or nil
+end
 
 local function hierarchyVisible(object, stopAt)
     local current = object
@@ -118,7 +126,7 @@ local function getLiveRestart()
     local playerGui = player and player:FindFirstChildOfClass("PlayerGui")
     if not playerGui then return nil end
 
-    -- Use the exact hierarchy from the game save. Do not scan StarterGui clones.
+    -- Exact hierarchy verified from the supplied game save.
     local endFrame = playerGui:FindFirstChild("EndFrame")
     if not endFrame or not endFrame:IsA("LayerCollector") or endFrame.Enabled ~= true then
         return nil
@@ -181,19 +189,111 @@ local function accepted(endFrame, restart, beforeText)
     return false
 end
 
-local function sendVIM(center)
+local function fireConnectionObject(connection)
+    if not connection then return false end
+    if type(connection.Fire) == "function" and pcall(connection.Fire, connection) then
+        return true
+    end
+    if type(connection.Function) == "function" and pcall(connection.Function) then
+        return true
+    end
+    return false
+end
+
+local function sendConnections(signal, signalName)
+    local getConnections = executorFunction("getconnections")
+    if not getConnections then return false, signalName .. ": getconnections unavailable" end
+
+    local ok, connections = pcall(getConnections, signal)
+    if not ok or type(connections) ~= "table" then
+        return false, signalName .. ": getconnections failed"
+    end
+
+    local fired = 0
+    for _, connection in ipairs(connections) do
+        if fireConnectionObject(connection) then fired = fired + 1 end
+    end
+    if fired <= 0 then
+        return false, signalName .. ": connections=0"
+    end
+    return true, signalName .. ": connections=" .. tostring(fired)
+end
+
+local function sendFireSignal(signal, signalName)
+    local fireSignal = executorFunction("firesignal")
+    if not fireSignal then return false, signalName .. ": firesignal unavailable" end
+    local ok, err = pcall(fireSignal, signal)
+    if not ok then return false, signalName .. ": " .. tostring(err) end
+    return true, signalName .. ": firesignal"
+end
+
+local function hideDevConsoleForFallback()
+    -- This is intentionally best-effort. If F9/DevConsole is covering the game,
+    -- coordinate input otherwise lands on CoreGui instead of the Restart button.
+    local ok = pcall(function()
+        StarterGui:SetCore("DevConsoleVisible", false)
+    end)
+    if ok then task.wait(0.12) end
+    return ok
+end
+
+local function sendSelectedObject(restart)
+    local okService, vim = pcall(game.GetService, game, "VirtualInputManager")
+    if not okService or not vim then return false, "SelectedObject: VIM unavailable" end
+
+    hideDevConsoleForFallback()
+
+    local previous
+    pcall(function()
+        previous = GuiService.SelectedObject
+        GuiService.SelectedObject = restart
+    end)
+
+    local ok, err = pcall(function()
+        vim:SendKeyEvent(true, Enum.KeyCode.Return, false, game)
+        task.wait(0.045)
+        vim:SendKeyEvent(false, Enum.KeyCode.Return, false, game)
+    end)
+
+    task.defer(function()
+        task.wait(0.2)
+        pcall(function()
+            if GuiService.SelectedObject == restart then
+                GuiService.SelectedObject = previous
+            end
+        end)
+    end)
+
+    if not ok then return false, "SelectedObject Return failed: " .. tostring(err) end
+    return true, "SelectedObject + Return"
+end
+
+local function sendVIM(restart, center)
     local heldOk, held = pcall(
         UserInputService.IsMouseButtonPressed,
         UserInputService,
         Enum.UserInputType.MouseButton1
     )
     if heldOk and held == true then
-        return false, "physical Mouse1 held"
+        return false, "VIM: physical Mouse1 held"
     end
 
     local okService, vim = pcall(game.GetService, game, "VirtualInputManager")
-    if not okService or not vim then
-        return false, "VIM unavailable"
+    if not okService or not vim then return false, "VIM unavailable" end
+
+    hideDevConsoleForFallback()
+
+    local oldZ
+    pcall(function()
+        oldZ = restart.ZIndex
+        restart.ZIndex = 10000
+    end)
+
+    local onScreen, currentCenter = geometry(restart)
+    center = currentCenter or center
+    if not onScreen or typeof(center) ~= "Vector2" then
+        if oldZ ~= nil then pcall(function() restart.ZIndex = oldZ end) end
+        return false, "VIM: Restart left viewport"
     end
 
     local ok, err = pcall(function()
@@ -201,75 +301,88 @@ local function sendVIM(center)
         task.wait(0.045)
         vim:SendMouseButtonEvent(center.X, center.Y, 0, false, game, 0)
     end)
+
+    if oldZ ~= nil then
+        task.defer(function()
+            task.wait(0.1)
+            pcall(function()
+                if restart and restart.Parent then restart.ZIndex = oldZ end
+            end)
+        end)
+    end
+
     if not ok then
         pcall(function()
             vim:SendMouseButtonEvent(center.X, center.Y, 0, false, game, 0)
         end)
-        return false, tostring(err)
+        return false, "VIM failed: " .. tostring(err)
     end
     return true, "VIM real button click"
 end
 
-local function executorFunction(name)
-    local value = rawget(environment, name) or rawget(_G, name)
-    return type(value) == "function" and value or nil
+local function methodTable(restart, center)
+    return {
+        {
+            name = "MouseButton1Click:getconnections",
+            send = function() return sendConnections(restart.MouseButton1Click, "MouseButton1Click") end,
+        },
+        {
+            name = "Activated:getconnections",
+            send = function() return sendConnections(restart.Activated, "Activated") end,
+        },
+        {
+            name = "MouseButton1Click:firesignal",
+            send = function() return sendFireSignal(restart.MouseButton1Click, "MouseButton1Click") end,
+        },
+        {
+            name = "Activated:firesignal",
+            send = function() return sendFireSignal(restart.Activated, "Activated") end,
+        },
+        {
+            name = "SelectedObject+Return",
+            send = function() return sendSelectedObject(restart) end,
+        },
+        {
+            name = "VIM",
+            send = function() return sendVIM(restart, center) end,
+        },
+    }
 end
 
-local function signalFallback(restart)
-    local getConnections = executorFunction("getconnections")
-    if getConnections then
-        for _, signal in ipairs({ restart.MouseButton1Click, restart.Activated }) do
-            local ok, connections = pcall(getConnections, signal)
-            if ok and type(connections) == "table" then
-                local fired = 0
-                for _, connection in ipairs(connections) do
-                    if type(connection.Fire) == "function" and pcall(connection.Fire, connection) then
-                        fired = fired + 1
-                    elseif type(connection.Function) == "function" and pcall(connection.Function) then
-                        fired = fired + 1
-                    end
-                end
-                if fired > 0 then
-                    return true, "connections=" .. tostring(fired)
-                end
-            end
-        end
+local function tryNextMethod(endFrame, restart, center)
+    local methods = methodTable(restart, center)
+    if control.methodIndex > #methods then
+        control.methodIndex = 1
+        control.nextAttempt = os.clock() + METHOD_CYCLE_DELAY
+        print("[XOMA V39] Auto Retry methods exhausted | cycling")
+        return false
     end
 
-    local fireSignal = executorFunction("firesignal")
-    if fireSignal then
-        local ok, err = pcall(fireSignal, restart.MouseButton1Click)
-        if ok then return true, "firesignal MouseButton1Click" end
-        return false, tostring(err)
-    end
-
-    return false, "no click fallback available"
-end
-
-local function clickRestart(endFrame, restart, center)
-    -- Snapshot BEFORE sending input. This fixes the old race where a synchronous
-    -- vote text update could happen before beforeText was captured.
-    local beforeText = buttonText(restart)
-    control.beforeText = beforeText
+    local method = methods[control.methodIndex]
+    control.methodIndex = control.methodIndex + 1
     control.attempts = (tonumber(control.attempts) or 0) + 1
 
-    local ok, detail = sendVIM(center)
-    if not ok then
-        ok, detail = signalFallback(restart)
-    end
+    -- Snapshot BEFORE signal dispatch. Some handlers update vote text synchronously.
+    local beforeText = buttonText(restart)
+    control.beforeText = beforeText
 
-    control.sent = ok
-    control.nextAttempt = os.clock() + RETRY_DELAY
-
+    local ok, detail = method.send()
     print(string.format(
-        "[XOMA V39] Auto Retry Restart attempt %d | %s",
+        "[XOMA V39] Auto Retry method %d | %s | %s",
         control.attempts,
+        method.name,
         tostring(detail)
     ))
 
-    if not ok then return false end
+    if not ok then
+        control.nextAttempt = os.clock() + NO_METHOD_DELAY
+        return false
+    end
 
-    local deadline = os.clock() + POST_CLICK_CONFIRM
+    control.sent = true
+    control.nextAttempt = os.clock() + METHOD_CONFIRM_WAIT
+
+    local deadline = os.clock() + METHOD_CONFIRM_WAIT
     repeat
         local done, why = accepted(endFrame, restart, beforeText)
         if done then
@@ -336,12 +449,12 @@ task.spawn(function()
 
         local stillOnScreen, currentCenter = geometry(restart)
         if stillOnScreen and restart.Active == true then
-            clickRestart(endFrame, restart, currentCenter or center)
+            tryNextMethod(endFrame, restart, currentCenter or center)
         end
     end
 end)
 
-session.endClickBuild = "PASS34-AUTORETRY-REAL-RESTART-V39"
-print("[XOMA V39] Auto Retry real-Restart hotfix installed")
+session.endClickBuild = "PASS35-AUTORETRY-DIRECT-SIGNAL-V39"
+print("[XOMA V39] Auto Retry direct-signal hotfix installed")
 
 return session.XOMA

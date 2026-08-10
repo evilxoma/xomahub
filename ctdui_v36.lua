@@ -1,6 +1,6 @@
 -- XOMA / CTDIG cache-busted bootstrap
--- Build: PASS26-WEBHOOK-ROUND-GATE-V36
--- Pinned V33 replay base + click-through + V36 reliability + webhook lifecycle
+-- Build: PASS26B-WEBHOOK-FRESH-ROUND-GATE-V36
+-- Pinned V33 replay base + click-through + V36 reliability + fresh-round webhook
 -- gate + V35 one-shot end-screen input.
 
 local function runSource(url, label)
@@ -18,7 +18,7 @@ local XOMA = runSource(
 )
 
 XOMA = runSource(
-    "https://raw.githubusercontent.com/evilxoma/xomahub/refs/heads/main/patches/input_v32.lua?build=PASS26-WEBHOOK-ROUND-GATE-V36",
+    "https://raw.githubusercontent.com/evilxoma/xomahub/refs/heads/main/patches/input_v32.lua?build=PASS26B-WEBHOOK-FRESH-ROUND-GATE-V36",
     "XOMA click-through"
 ) or XOMA
 
@@ -28,7 +28,7 @@ XOMA = runSource(
 ) or XOMA
 
 XOMA = runSource(
-    "https://raw.githubusercontent.com/evilxoma/xomahub/8c41ccb863060fdf7697f843539bb51933c315c2/patches/webhook_v36.lua",
+    "https://raw.githubusercontent.com/evilxoma/xomahub/fe47810f6257484fdb388ec399a3f2cffa16f01a/patches/webhook_v36.lua",
     "XOMA V36 webhook"
 ) or XOMA
 
@@ -40,8 +40,8 @@ XOMA = runSource(
 local environment = typeof(getgenv) == "function" and getgenv() or _G
 local session = environment.CTDIG_SESSION
 if type(session) == "table" then
-    session.bootstrapBuild = "PASS26-WEBHOOK-ROUND-GATE-V36"
+    session.bootstrapBuild = "PASS26B-WEBHOOK-FRESH-ROUND-GATE-V36"
 end
 
-print("[XOMA V36] cache-busted bootstrap loaded | webhook round gate")
+print("[XOMA V36] cache-busted bootstrap loaded | webhook fresh-round gate")
 return XOMA

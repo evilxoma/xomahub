@@ -1,7 +1,10 @@
 -- XOMA / CTDIG cache-busted bootstrap
--- Build: PASS30-AUTORETRY-VIEWPORT-V39
--- Pinned V33 replay base + click-through + safe V39 reliability + live EndFrame
--- webhook gate + real end-screen Restart watcher.
+-- Build: PASS31-AUTORETRY-REAL-END-V39
+-- V33 replay base is frozen to one source snapshot, then V39 applies only the
+-- existing input/reliability/webhook layers plus the authoritative end watcher.
+
+local CORE_REF = "faa93d642b8f577bd50e819f5bbd34c442c291e6"
+local BASE_REF = "be5bdb4c68e59796ecba8bad836cbea945b77c02"
 
 local function runSource(url, label)
     local source = game:HttpGet(url)
@@ -12,13 +15,71 @@ local function runSource(url, label)
     return chunk()
 end
 
-local XOMA = runSource(
-    "https://raw.githubusercontent.com/evilxoma/xomahub/be5bdb4c68e59796ecba8bad836cbea945b77c02/ctdui.lua",
-    "XOMA V33 base"
+local function insertBeforePlain(source, needle, insertion, label)
+    local first = source:find(needle, 1, true)
+    if not first then
+        error(label .. " patch anchor missing")
+    end
+    return source:sub(1, first - 1) .. insertion .. source:sub(first)
+end
+
+local function runPinnedBase()
+    local source = game:HttpGet(
+        "https://raw.githubusercontent.com/evilxoma/xomahub/" .. BASE_REF .. "/ctdui.lua"
+    )
+
+    -- The pinned ctdui.lua historically fetched src/patches from main. Freeze
+    -- those URLs too so V39 cannot silently change when another branch updates.
+    source = source:gsub(
+        "https://raw%.githubusercontent%.com/evilxoma/xomahub/refs/heads/main/src/",
+        "https://raw.githubusercontent.com/evilxoma/xomahub/" .. CORE_REF .. "/src/"
+    )
+    source = source:gsub(
+        "https://raw%.githubusercontent%.com/evilxoma/xomahub/refs/heads/main/patches/",
+        "https://raw.githubusercontent.com/evilxoma/xomahub/" .. CORE_REF .. "/patches/"
+    )
+
+    -- Add one V39-only escape hatch for the end watcher. It changes no replay
+    -- action implementation; it only flips the same local stop flags used by
+    -- the existing Stop Replay/end-action paths once a REAL end screen exists.
+    local replayStopPatch = [=[
+coreSource = coreSource:gsub(
+    "session%.recorder = {%s+bindGameSources = bindGameSources,",
+    [[session.stopReplayForEndScreen = function(reason)
+        replayStopRequested = true
+        replaying = false
+        if replayTaskRunning then
+            setRecorderState("replay_stopped")
+            setReplayStatus("Stopped: " .. tostring(reason or "end screen"))
+        end
+        return true
+    end
+
+    session.recorder = {
+        bindGameSources = bindGameSources,]],
+    1
 )
 
+]=]
+
+    source = insertBeforePlain(
+        source,
+        "local coreChunk, coreError = loadstring(coreSource)",
+        replayStopPatch,
+        "XOMA V39 replay-stop"
+    )
+
+    local chunk, err = loadstring(source)
+    if not chunk then
+        error("XOMA V39 pinned base compile failed: " .. tostring(err))
+    end
+    return chunk()
+end
+
+local XOMA = runPinnedBase()
+
 XOMA = runSource(
-    "https://raw.githubusercontent.com/evilxoma/xomahub/refs/heads/main/patches/input_v32.lua?build=PASS30-AUTORETRY-VIEWPORT-V39",
+    "https://raw.githubusercontent.com/evilxoma/xomahub/" .. CORE_REF .. "/patches/input_v32.lua",
     "XOMA click-through"
 ) or XOMA
 
@@ -33,15 +94,16 @@ XOMA = runSource(
 ) or XOMA
 
 XOMA = runSource(
-    "https://raw.githubusercontent.com/evilxoma/xomahub/0a2ed0fb8fe74243930e145f95aa5e35ca22702b/patches/endclick_v39.lua",
+    "https://raw.githubusercontent.com/evilxoma/xomahub/fa6a5b6fc859114f8d5974dcd99a4b2083ac73ae/patches/endclick_v39.lua",
     "XOMA V39 real end-screen click"
 ) or XOMA
 
 local environment = typeof(getgenv) == "function" and getgenv() or _G
 local session = environment.CTDIG_SESSION
 if type(session) == "table" then
-    session.bootstrapBuild = "PASS30-AUTORETRY-VIEWPORT-V39"
+    session.bootstrapBuild = "PASS31-AUTORETRY-REAL-END-V39"
+    session.bootstrapCoreRef = CORE_REF
 end
 
-print("[XOMA V39] cache-busted bootstrap loaded | viewport-safe Auto Retry")
+print("[XOMA V39] cache-busted bootstrap loaded | active + viewport-safe Auto Retry")
 return XOMA

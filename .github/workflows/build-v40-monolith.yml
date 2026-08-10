@@ -1,0 +1,50 @@
+name: Build V40 Monolith
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "tools/build_v40_monolith.py"
+      - "ctdui.lua"
+      - "src/**"
+      - "patches/**"
+      - ".github/workflows/build-v40-monolith.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Build monolith
+        run: python3 tools/build_v40_monolith.py
+
+      - name: Verify one-file runtime
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -s ctdui_v40.lua
+          ! grep -Eq 'raw\.githubusercontent\.com/evilxoma/xomahub/.*/(src|patches)/' ctdui_v40.lua
+          grep -Fq 'ctdui_v40.lua' ctdui_v40.lua
+          grep -Fq '[XOMA V40] monolith loaded | single-file runtime' ctdui_v40.lua
+
+      - name: Commit generated monolith
+        shell: bash
+        run: |
+          set -euo pipefail
+          if git diff --quiet -- ctdui_v40.lua && git ls-files --error-unmatch ctdui_v40.lua >/dev/null 2>&1; then
+            echo "ctdui_v40.lua already up to date"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add ctdui_v40.lua
+          git commit -m "Build V40 monolith"
+          git push

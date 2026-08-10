@@ -1,5 +1,5 @@
 -- XOMA / CTDIG cache-busted bootstrap
--- Build: PASS35-AUTORETRY-DIRECT-SIGNAL-V39
+-- Build: PASS36-AUTORETRY-INJECTOR-API-V39
 -- V33 replay base is frozen to one source snapshot, then V39 applies only the
 -- existing input/reliability/webhook layers plus the authoritative end watcher.
 
@@ -99,20 +99,20 @@ XOMA = runSource(
 
 XOMA = runSource(
     "https://raw.githubusercontent.com/evilxoma/xomahub/0867a0957c5833a4fda30f7f357d73b766fe3c85/patches/endclick_v39.lua",
-    "XOMA V39 click-cascade end-screen click"
+    "XOMA V39 legacy end-screen watcher"
 ) or XOMA
 
 XOMA = runSource(
-    "https://raw.githubusercontent.com/evilxoma/xomahub/e0118cd9608dd9bc27065b3d81b054fdac81eacc/patches/endclick_v39_hotfix.lua",
-    "XOMA V39 direct-signal Restart hotfix"
+    "https://raw.githubusercontent.com/evilxoma/xomahub/b73de5197c78d2d42f3bce06ffafa03de6fda6ad/patches/endclick_v39_hotfix.lua",
+    "XOMA V39 injector-API Auto Retry hotfix"
 ) or XOMA
 
 local environment = typeof(getgenv) == "function" and getgenv() or _G
 local session = environment.CTDIG_SESSION
 if type(session) == "table" then
-    session.bootstrapBuild = "PASS35-AUTORETRY-DIRECT-SIGNAL-V39"
+    session.bootstrapBuild = "PASS36-AUTORETRY-INJECTOR-API-V39"
     session.bootstrapCoreRef = CORE_REF
 end
 
-print("[XOMA V39] cache-busted bootstrap loaded | direct-signal Restart Auto Retry")
+print("[XOMA V39] cache-busted bootstrap loaded | injector-API Auto Retry")
 return XOMA

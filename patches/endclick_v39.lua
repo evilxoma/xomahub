@@ -1,8 +1,8 @@
 -- XOMA Auto Retry authoritative end-screen watcher
--- Build: PASS32-AUTORETRY-DIRECT-CLICK-V39
--- Only a live, active, on-screen Restart + Return pair from the same RoundFrame
--- is allowed to arm Auto Retry. Once armed, click the actual GuiButton signal
--- directly instead of sending screen-coordinate mouse input.
+-- Build: PASS33-AUTORETRY-CLICK-CASCADE-V39
+-- Detect only the real active Restart + Return pair. Once armed, try the
+-- actual GuiButton signals one method at a time and advance to another method
+-- if the previous one produced no game-side confirmation.
 
 local environment = typeof(getgenv) == "function" and getgenv() or _G
 local session = environment.CTDIG_SESSION
@@ -15,6 +15,8 @@ then
 end
 
 local Players = game:GetService("Players")
+local RunService = game:GetService("RunService")
+local UserInputService = game:GetService("UserInputService")
 local Workspace = game:GetService("Workspace")
 local player = Players.LocalPlayer
 
@@ -23,10 +25,11 @@ if type(session.endClickOriginalHandleV39) ~= "function" then
 end
 local originalHandle = session.endClickOriginalHandleV39
 
-local CLICK_INTERVAL = 2.5
-local MAX_ATTEMPTS = 4
-local NEW_MATCH_RESET_DELAY = 3
-local OFFSCREEN_LOG_INTERVAL = 4
+local SENT_METHOD_DELAY = 2.75
+local NO_METHOD_DELAY = 0.20
+local NEW_MATCH_RESET_DELAY = 3.0
+local OFFSCREEN_LOG_INTERVAL = 4.0
+local METHOD_CYCLE_DELAY = 3.0
 local lastOffscreenLog = -math.huge
 
 local control = session.endClickV39
@@ -40,15 +43,15 @@ local function resetControl()
     control.container = nil
     control.restart = nil
     control.returnButton = nil
-    control.attempts = 0
-    control.lastAttempt = 0
     control.busy = false
     control.confirmed = false
     control.beforeText = nil
     control.missingSince = 0
-    control.exhaustedLogged = false
     control.replayStopped = false
     control.sentAtLeastOnce = false
+    control.methodIndex = 1
+    control.cycle = 1
+    control.nextActionAt = 0
 end
 
 resetControl()
@@ -109,13 +112,10 @@ local function readButtonGeometry(button)
         return false, false, position, size, viewport, nil
     end
 
-    local right = position.X + size.X
-    local bottom = position.Y + size.Y
-    local intersects = right > 0
-        and bottom > 0
+    local intersects = position.X + size.X > 0
+        and position.Y + size.Y > 0
         and position.X < viewport.X
         and position.Y < viewport.Y
-
     local center = position + size / 2
     local centerOnScreen = center.X >= 0
         and center.Y >= 0
@@ -143,19 +143,6 @@ local function geometryText(position, size, viewport)
     )
 end
 
-local function baseButtonState(button, playerGui)
-    if not button
-        or not button:IsA("GuiButton")
-        or button.Visible ~= true
-        or not hierarchyVisible(button, playerGui)
-    then
-        return false, false, false
-    end
-
-    local intersects = readButtonGeometry(button)
-    return true, button.Active == true, intersects
-end
-
 local function looksLikeRestart(button)
     if not button or not button:IsA("GuiButton") then return false end
     if button.Name == "Restart" then return true end
@@ -174,9 +161,7 @@ end
 local function findEndFrame(object)
     local current = object and object.Parent
     while current do
-        if current.Name == "EndFrame" then
-            return current
-        end
+        if current.Name == "EndFrame" then return current end
         current = current.Parent
     end
     return nil
@@ -194,6 +179,18 @@ local function findActionContainer(button, endFrame)
     return fallback
 end
 
+local function buttonState(button, playerGui)
+    if not button
+        or not button:IsA("GuiButton")
+        or button.Visible ~= true
+        or not hierarchyVisible(button, playerGui)
+    then
+        return false, false, false
+    end
+    local intersects = readButtonGeometry(button)
+    return true, button.Active == true, intersects
+end
+
 local function findLiveEndActions(playerGui)
     if not playerGui then return nil, nil, nil, nil, nil end
 
@@ -204,7 +201,7 @@ local function findLiveEndActions(playerGui)
         if object:IsA("GuiButton") and (looksLikeRestart(object) or looksLikeReturn(object)) then
             local endFrame = findEndFrame(object)
             if endFrame and hierarchyVisible(endFrame, playerGui) then
-                local baseOk, active, onScreen = baseButtonState(object, playerGui)
+                local baseOk, active, onScreen = buttonState(object, playerGui)
                 if baseOk then
                     local container = findActionContainer(object, endFrame)
                     if container and hierarchyVisible(container, playerGui) then
@@ -227,9 +224,7 @@ local function findLiveEndActions(playerGui)
                                 entry.restart = object
                                 entry.restartActive = active
                                 entry.restartOnScreen = onScreen
-                                if not onScreen then
-                                    ignoredRestart = object
-                                end
+                                if not onScreen then ignoredRestart = object end
                             elseif looksLikeReturn(object) then
                                 entry.returnButton = object
                                 entry.returnActive = active
@@ -257,20 +252,35 @@ local function findLiveEndActions(playerGui)
     return nil, nil, nil, nil, ignoredRestart
 end
 
+local function livePairStillValid(playerGui, endFrame, container, restartButton, returnButton)
+    if not playerGui
+        or not endFrame or not endFrame.Parent
+        or not container or not container.Parent
+        or not restartButton or not restartButton.Parent
+        or not returnButton or not returnButton.Parent
+        or findEndFrame(restartButton) ~= endFrame
+        or findEndFrame(returnButton) ~= endFrame
+        or findActionContainer(restartButton, endFrame) ~= container
+        or findActionContainer(returnButton, endFrame) ~= container
+    then
+        return false
+    end
+
+    local rBase, rActive, rOnScreen = buttonState(restartButton, playerGui)
+    local bBase, bActive, bOnScreen = buttonState(returnButton, playerGui)
+    return rBase and rActive and rOnScreen and bBase and bActive and bOnScreen
+end
+
 local function readResult()
     local playerResult = player and player:FindFirstChild("PlayerGameResult")
     local playerText = playerResult and tostring(playerResult.Value) or ""
-    if playerText == "Triumph" or playerText == "Defeat" then
-        return playerText
-    end
+    if playerText == "Triumph" or playerText == "Defeat" then return playerText end
 
     local service = Workspace:FindFirstChild("WorkspaceScriptService")
     local rewards = service and service:FindFirstChild("Rewards")
     local rewardResult = rewards and rewards:FindFirstChild("Result")
     local rewardText = rewardResult and tostring(rewardResult.Value) or ""
-    if rewardText == "Triumph" or rewardText == "Defeat" then
-        return rewardText
-    end
+    if rewardText == "Triumph" or rewardText == "Defeat" then return rewardText end
     return nil
 end
 
@@ -303,6 +313,9 @@ local function accepted(endFrame, container, button, beforeText)
     if playerGui and not hierarchyVisible(button, playerGui) then
         return true, "Restart button hidden"
     end
+    if button.Active == false then
+        return true, "Restart button became inactive"
+    end
 
     local onScreen = readButtonGeometry(button)
     if not onScreen then
@@ -319,21 +332,28 @@ local function accepted(endFrame, container, button, beforeText)
     return false
 end
 
-local function livePairStillValid(playerGui, endFrame, container, restartButton, returnButton)
-    if not playerGui
-        or not endFrame or not endFrame.Parent
-        or not container or not container.Parent
-        or findEndFrame(restartButton) ~= endFrame
-        or findEndFrame(returnButton) ~= endFrame
-        or findActionContainer(restartButton, endFrame) ~= container
-        or findActionContainer(returnButton, endFrame) ~= container
-    then
-        return false
-    end
+local function confirmRestart(why)
+    if control.confirmed then return end
+    control.confirmed = true
+    control.missingSince = 0
+    print("[XOMA V39] Auto Retry confirmed | " .. tostring(why))
+end
 
-    local rBase, rActive, rOnScreen = baseButtonState(restartButton, playerGui)
-    local bBase, bActive, bOnScreen = baseButtonState(returnButton, playerGui)
-    return rBase and rActive and rOnScreen and bBase and bActive and bOnScreen
+local function logOffscreen(button)
+    local now = os.clock()
+    if now - lastOffscreenLog < OFFSCREEN_LOG_INTERVAL then return end
+    lastOffscreenLog = now
+    local _, _, position, size, viewport = readButtonGeometry(button)
+    print("[XOMA V39] Restart ignored off-screen | " .. geometryText(position, size, viewport))
+end
+
+local function stopReplayForRealEnd()
+    if control.replayStopped then return end
+    control.replayStopped = true
+    if type(session.stopReplayForEndScreen) == "function" then
+        local ok, err = pcall(session.stopReplayForEndScreen, "real end screen")
+        if not ok then warn("[XOMA V39] Replay stop hook failed | " .. tostring(err)) end
+    end
 end
 
 local function fireConnectionObject(connection)
@@ -347,104 +367,150 @@ local function fireConnectionObject(connection)
     return false
 end
 
-local function directClick(endFrame, container, button, returnButton, attempt)
-    local playerGui = player and player:FindFirstChildOfClass("PlayerGui")
-    if not livePairStillValid(playerGui, endFrame, container, button, returnButton) then
-        return false, "end-screen pair changed before click", "changed"
+local function sendConnections(signal)
+    local getConnections = executorFunction("getconnections")
+    if not getConnections then return false, "getconnections unavailable" end
+
+    local ok, connections = pcall(getConnections, signal)
+    if not ok or type(connections) ~= "table" then
+        return false, "getconnections failed"
     end
 
-    local intersects, centerOnScreen, position, size, viewport = readButtonGeometry(button)
+    local fired = 0
+    for _, connection in ipairs(connections) do
+        if fireConnectionObject(connection) then fired = fired + 1 end
+    end
+    if fired <= 0 then return false, "connections=0" end
+    return true, "connections=" .. tostring(fired)
+end
+
+local function sendFireSignal(signal)
+    local fireSignal = executorFunction("firesignal")
+    if not fireSignal then return false, "firesignal unavailable" end
+    local ok, err = pcall(fireSignal, signal)
+    if not ok then return false, "firesignal failed: " .. tostring(err) end
+    return true, "firesignal"
+end
+
+local function sendVIM(button)
+    local okService, vim = pcall(game.GetService, game, "VirtualInputManager")
+    if not okService or not vim then return false, "VIM unavailable" end
+
+    local heldOk, held = pcall(
+        UserInputService.IsMouseButtonPressed,
+        UserInputService,
+        Enum.UserInputType.MouseButton1
+    )
+    if heldOk and held == true then return false, "physical Mouse1 held" end
+
+    local intersects, centerOnScreen, _, _, _, center = readButtonGeometry(button)
+    if not intersects or not centerOnScreen then return false, "button left viewport" end
+
+    local ok, err = pcall(function()
+        vim:SendMouseButtonEvent(center.X, center.Y, 0, true, game, 0)
+        task.wait(0.05)
+        vim:SendMouseButtonEvent(center.X, center.Y, 0, false, game, 0)
+    end)
+    if not ok then
+        pcall(function()
+            vim:SendMouseButtonEvent(center.X, center.Y, 0, false, game, 0)
+        end)
+        return false, "VIM failed: " .. tostring(err)
+    end
+    return true, "VIM"
+end
+
+local function methodTable(button)
+    return {
+        {
+            name = "MouseButton1Click:getconnections",
+            send = function() return sendConnections(button.MouseButton1Click) end,
+        },
+        {
+            name = "Activated:getconnections",
+            send = function() return sendConnections(button.Activated) end,
+        },
+        {
+            name = "MouseButton1Click:firesignal",
+            send = function() return sendFireSignal(button.MouseButton1Click) end,
+        },
+        {
+            name = "Activated:firesignal",
+            send = function() return sendFireSignal(button.Activated) end,
+        },
+        {
+            name = "MouseButton1Down:getconnections",
+            send = function() return sendConnections(button.MouseButton1Down) end,
+        },
+        {
+            name = "MouseButton1Up:getconnections",
+            send = function() return sendConnections(button.MouseButton1Up) end,
+        },
+        {
+            name = "MouseButton1Down:firesignal",
+            send = function() return sendFireSignal(button.MouseButton1Down) end,
+        },
+        {
+            name = "MouseButton1Up:firesignal",
+            send = function() return sendFireSignal(button.MouseButton1Up) end,
+        },
+        {
+            name = "VIM:fallback",
+            send = function() return sendVIM(button) end,
+        },
+    }
+end
+
+local function tryNextClickMethod(endFrame, container, restartButton, returnButton)
+    local playerGui = player and player:FindFirstChildOfClass("PlayerGui")
+    if not livePairStillValid(playerGui, endFrame, container, restartButton, returnButton) then
+        return false, "pair changed", "changed"
+    end
+
+    local methods = methodTable(restartButton)
+    if control.methodIndex > #methods then
+        control.methodIndex = 1
+        control.cycle = (tonumber(control.cycle) or 1) + 1
+        control.nextActionAt = os.clock() + METHOD_CYCLE_DELAY
+        print("[XOMA V39] Auto Retry click methods exhausted | cycling again")
+        return false, "cycle reset", "wait"
+    end
+
+    local method = methods[control.methodIndex]
+    control.methodIndex = control.methodIndex + 1
+
+    local intersects, centerOnScreen, position, size, viewport = readButtonGeometry(restartButton)
     if not intersects or not centerOnScreen then
         return false, geometryText(position, size, viewport), "offscreen"
     end
 
-    local candidates = {
-        { name = "MouseButton1Click", signal = button.MouseButton1Click },
-        { name = "Activated", signal = button.Activated },
-    }
-
-    local getConnections = executorFunction("getconnections")
-    if getConnections then
-        for _, candidate in ipairs(candidates) do
-            local okConnections, signalConnections = pcall(getConnections, candidate.signal)
-            if okConnections and type(signalConnections) == "table" then
-                local fired = 0
-                for _, connection in ipairs(signalConnections) do
-                    if fireConnectionObject(connection) then
-                        fired = fired + 1
-                    end
-                end
-                if fired > 0 then
-                    local detail = candidate.name .. ":connections=" .. tostring(fired)
-                    print(string.format(
-                        "[XOMA V39] Auto Retry direct click %d | %s | %s",
-                        attempt,
-                        detail,
-                        geometryText(position, size, viewport)
-                    ))
-                    return true, detail, "sent"
-                end
-            end
-        end
+    local ok, detail = method.send()
+    if not ok then
+        print(string.format(
+            "[XOMA V39] Auto Retry method skipped | %s | %s",
+            method.name,
+            tostring(detail)
+        ))
+        control.nextActionAt = os.clock() + NO_METHOD_DELAY
+        return false, detail, "unavailable"
     end
 
-    local fireSignal = executorFunction("firesignal")
-    if fireSignal then
-        -- Without getconnections we cannot know which completed-click signal the
-        -- game subscribed to. Alternate rather than firing both and risking a
-        -- duplicate vote from one attempt.
-        local candidate = candidates[((attempt - 1) % #candidates) + 1]
-        local ok, err = pcall(fireSignal, candidate.signal)
-        if ok then
-            local detail = candidate.name .. ":firesignal"
-            print(string.format(
-                "[XOMA V39] Auto Retry direct click %d | %s | %s",
-                attempt,
-                detail,
-                geometryText(position, size, viewport)
-            ))
-            return true, detail, "sent"
-        end
-        return false, candidate.name .. " firesignal failed: " .. tostring(err), "failed"
-    end
-
-    return false, "executor has no getconnections/firesignal", "failed"
+    control.sentAtLeastOnce = true
+    control.beforeText = buttonText(restartButton)
+    control.nextActionAt = os.clock() + SENT_METHOD_DELAY
+    print(string.format(
+        "[XOMA V39] Auto Retry direct click | method=%s | %s | %s",
+        method.name,
+        tostring(detail),
+        geometryText(position, size, viewport)
+    ))
+    return true, method.name, "sent"
 end
 
-local function confirmRestart(why)
-    if control.confirmed then return end
-    control.confirmed = true
-    control.missingSince = 0
-    print("[XOMA V39] Auto Retry confirmed | " .. tostring(why))
-end
-
-local function logOffscreen(button)
-    local now = os.clock()
-    if now - lastOffscreenLog < OFFSCREEN_LOG_INTERVAL then return end
-    lastOffscreenLog = now
-
-    local _, _, position, size, viewport = readButtonGeometry(button)
-    print("[XOMA V39] Restart ignored off-screen | " .. geometryText(position, size, viewport))
-end
-
-local function stopReplayForRealEnd()
-    if control.replayStopped then return end
-    control.replayStopped = true
-    if type(session.stopReplayForEndScreen) == "function" then
-        local ok, err = pcall(session.stopReplayForEndScreen, "real end screen")
-        if not ok then
-            warn("[XOMA V39] Replay stop hook failed | " .. tostring(err))
-        end
-    end
-end
-
--- Forced Auto Retry owns Restart. The old handler is retained only for
--- non-forced mode. Result values remain webhook diagnostics, never a Retry gate.
+-- Forced Auto Retry owns Restart. Result values are webhook diagnostics only.
 session.recorder.handleEndAction = function(...)
     if not session.alive then return end
-    if session.forceAutoRetry ~= true then
-        return originalHandle(...)
-    end
+    if session.forceAutoRetry ~= true then return originalHandle(...) end
 
     local playerGui = player and player:FindFirstChildOfClass("PlayerGui")
     local endFrame = findLiveEndActions(playerGui)
@@ -475,9 +541,7 @@ task.spawn(function()
             findLiveEndActions(playerGui)
 
         if not endFrame or not container or not restartButton or not returnButton then
-            if ignoredRestart and not control.confirmed and control.attempts == 0 then
-                logOffscreen(ignoredRestart)
-            end
+            if ignoredRestart and not control.confirmed then logOffscreen(ignoredRestart) end
 
             if control.sentAtLeastOnce and not control.confirmed then
                 local done, why = accepted(
@@ -520,9 +584,8 @@ task.spawn(function()
             )
         end
 
-        if control.confirmed then continue end
+        if control.confirmed or control.busy then continue end
 
-        local beforeText = buttonText(restartButton)
         if control.sentAtLeastOnce and control.beforeText then
             local done, why = accepted(endFrame, container, restartButton, control.beforeText)
             if done then
@@ -531,20 +594,7 @@ task.spawn(function()
             end
         end
 
-        if control.busy then continue end
-
-        local now = os.clock()
-        if control.attempts >= MAX_ATTEMPTS then
-            if not control.exhaustedLogged then
-                control.exhaustedLogged = true
-                warn("[XOMA V39] Auto Retry stopped after "
-                    .. tostring(MAX_ATTEMPTS) .. " unconfirmed clicks")
-            end
-            continue
-        end
-        if control.lastAttempt > 0 and now - control.lastAttempt < CLICK_INTERVAL then
-            continue
-        end
+        if os.clock() < (control.nextActionAt or 0) then continue end
 
         local intersects, centerOnScreen = readButtonGeometry(restartButton)
         if not intersects or not centerOnScreen then
@@ -553,37 +603,24 @@ task.spawn(function()
         end
 
         control.busy = true
-        local attempt = control.attempts + 1
-        local ok, detail, status = directClick(
+        local sent, _, status = tryNextClickMethod(
             endFrame,
             container,
             restartButton,
-            returnButton,
-            attempt
+            returnButton
         )
+        control.busy = false
 
         if status == "offscreen" then
             logOffscreen(restartButton)
-            control.busy = false
-            continue
-        elseif status == "changed" then
-            control.busy = false
-            continue
-        end
-
-        control.attempts = attempt
-        control.lastAttempt = os.clock()
-
-        if ok then
-            control.sentAtLeastOnce = true
-            control.beforeText = beforeText
-            local deadline = os.clock() + 1.25
+        elseif sent then
+            local deadline = os.clock() + 1.0
             repeat
                 local acceptedNow, acceptedWhy = accepted(
                     endFrame,
                     container,
                     restartButton,
-                    beforeText
+                    control.beforeText or ""
                 )
                 if acceptedNow then
                     confirmRestart(acceptedWhy)
@@ -591,15 +628,11 @@ task.spawn(function()
                 end
                 task.wait(0.04)
             until os.clock() >= deadline
-        else
-            warn("[XOMA V39] Auto Retry direct click failed | " .. tostring(detail))
         end
-
-        control.busy = false
     end
 end)
 
-session.endClickBuild = "PASS32-AUTORETRY-DIRECT-CLICK-V39"
-print("[XOMA V39] Auto Retry direct-button watcher installed")
+session.endClickBuild = "PASS33-AUTORETRY-CLICK-CASCADE-V39"
+print("[XOMA V39] Auto Retry click-cascade watcher installed")
 
 return session.XOMA

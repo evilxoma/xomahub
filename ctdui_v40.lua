@@ -10273,7 +10273,8 @@ end
 
 do
     local source = [===[-- XOMA / CTDIG reliability patch
--- Build: PASS30-MONOLITH-AUTORETRY-RECONNECT-RECORDER-V40
+-- Build: PASS29B-AUTORETRY-SAFE-V40
+-- Auto Retry is authoritative without repeatedly driving Obsidian Config callbacks.
 
 local environment = typeof(getgenv) == "function" and getgenv() or _G
 local session = environment.CTDIG_SESSION
@@ -10291,6 +10292,8 @@ local player = Players.LocalPlayer
 local MACRO_FILE = "ctdig.lua"
 local BOOTSTRAP_URL = "https://raw.githubusercontent.com/evilxoma/xomahub/refs/heads/main/ctdui_v40.lua"
 
+-- Authoritative internal setting. End-click V40B reads this directly, so Auto
+-- Retry remains ON even if Obsidian SaveManager/autoload leaves its UI toggle OFF.
 session.forceAutoRetry = true
 
 if type(session.reliabilityOriginalConfig) ~= "function" then
@@ -10309,20 +10312,29 @@ local function forcedConfig(config)
     return result
 end
 
-local function forceAutoRetry()
-    if not session.alive or type(session.XOMA) ~= "table" then
-        return false
+local function storeForcedMacroConfig()
+    if type(session.XOMA) ~= "table" or type(session.XOMA._macro) ~= "table" then
+        return
     end
-    local config = forcedConfig(session.XOMA._macro and session.XOMA._macro.config)
-    local ok = pcall(originalConfig, session.XOMA, config)
-    if ok and type(session.XOMA._macro) == "table" then
-        session.XOMA._macro.config = config
-    end
-    return ok
+    session.XOMA._macro.config = forcedConfig(session.XOMA._macro.config)
 end
 
+-- Strategy Config still reaches the original implementation when possible, but
+-- a bad Obsidian OnChanged callback must never abort the strategy. Crucially, we
+-- DO NOT call this every 0.5s anymore; that was the source of Config/SetValue
+-- callback errors seen during bootstrap.
 session.XOMA.Config = function(self, config)
-    return originalConfig(self, forcedConfig(config))
+    local forced = forcedConfig(config)
+    if type(self._macro) == "table" then
+        self._macro.config = forced
+    end
+
+    local ok, result = pcall(originalConfig, self, forced)
+    if not ok then
+        warn("[XOMA V40] Config UI callback ignored: " .. tostring(result))
+        return self
+    end
+    return result or self
 end
 
 local function upgradeSavedMacro()
@@ -10361,7 +10373,7 @@ local function upgradeSavedMacro()
 end
 
 session.upgradeSavedMacroBootstrapV40 = upgradeSavedMacro
-forceAutoRetry()
+storeForcedMacroConfig()
 upgradeSavedMacro()
 
 if session.reliabilityMonitorV40Installed ~= true then
@@ -10369,7 +10381,10 @@ if session.reliabilityMonitorV40Installed ~= true then
     task.spawn(function()
         while session.alive do
             task.wait(0.5)
-            forceAutoRetry()
+            -- Do not touch UI/config callbacks here. Keep only the internal
+            -- authoritative flag/config and recorder bootstrap normalization.
+            session.forceAutoRetry = true
+            storeForcedMacroConfig()
             upgradeSavedMacro()
         end
     end)
@@ -10480,8 +10495,8 @@ if session.reconnectWatchersV40Installed ~= true then
     end)
 end
 
-session.reliabilityBuild = "PASS30-MONOLITH-AUTORETRY-RECONNECT-RECORDER-V40"
-print("[XOMA V40] Auto Retry forced ON | reconnect installed | recorder -> V40")
+session.reliabilityBuild = "PASS29B-AUTORETRY-SAFE-V40"
+print("[XOMA V40] Auto Retry forced internally | safe config | reconnect installed")
 return session.XOMA
 ]===]
     local chunk, err = loadstring(source)

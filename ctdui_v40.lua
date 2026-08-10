@@ -10579,9 +10579,10 @@ end
 
 do
     local source = [===[-- XOMA Auto Retry authoritative end-screen watcher
--- Build: PASS31-AUTORETRY-REAL-END-V40
+-- Build: PASS32-AUTORETRY-DIRECT-CLICK-V40
 -- Only a live, active, on-screen Restart + Return pair from the same RoundFrame
--- is allowed to arm Auto Retry. Fake/off-screen EndFrame states are ignored.
+-- is allowed to arm Auto Retry. Once armed, click the actual GuiButton signal
+-- directly instead of sending screen-coordinate mouse input.
 
 local environment = typeof(getgenv) == "function" and getgenv() or _G
 local session = environment.CTDIG_SESSION
@@ -10594,8 +10595,6 @@ then
 end
 
 local Players = game:GetService("Players")
-local RunService = game:GetService("RunService")
-local UserInputService = game:GetService("UserInputService")
 local Workspace = game:GetService("Workspace")
 local player = Players.LocalPlayer
 
@@ -10855,75 +10854,6 @@ local function readResult()
     return nil
 end
 
-local function findCTDIGScreenGuis()
-    local roots = {}
-    local playerGui = player and player:FindFirstChildOfClass("PlayerGui")
-    local gethuiFn = executorFunction("gethui")
-    if gethuiFn then
-        local ok, hui = pcall(gethuiFn)
-        if ok and typeof(hui) == "Instance" then roots[#roots + 1] = hui end
-    end
-
-    local okCore, coreGui = pcall(game.GetService, game, "CoreGui")
-    if okCore and coreGui and not table.find(roots, coreGui) then
-        roots[#roots + 1] = coreGui
-    end
-    if playerGui and not table.find(roots, playerGui) then
-        roots[#roots + 1] = playerGui
-    end
-
-    local found, seen = {}, {}
-    local function addScreen(screen)
-        if not screen or seen[screen] then return end
-        local name = string.lower(tostring(screen.Name or ""))
-        local matches = name:find("obsidian", 1, true) ~= nil
-            or name:find("ctdig", 1, true) ~= nil
-
-        if not matches then
-            for _, object in ipairs(screen:GetDescendants()) do
-                if (object:IsA("TextLabel") or object:IsA("TextButton"))
-                    and tostring(object.Text):find("CTDIG", 1, true)
-                then
-                    matches = true
-                    break
-                end
-            end
-        end
-
-        if matches then
-            seen[screen] = true
-            found[#found + 1] = screen
-        end
-    end
-
-    for _, root in ipairs(roots) do
-        if root:IsA("ScreenGui") then addScreen(root) end
-        for _, object in ipairs(root:GetDescendants()) do
-            if object:IsA("ScreenGui") then addScreen(object) end
-        end
-    end
-    return found
-end
-
-local function suppressCTDIG()
-    local restore = {}
-    for _, screen in ipairs(findCTDIGScreenGuis()) do
-        local ok, enabled = pcall(function() return screen.Enabled end)
-        if ok and enabled == true then
-            restore[#restore + 1] = screen
-            pcall(function() screen.Enabled = false end)
-        end
-    end
-
-    return function()
-        for _, screen in ipairs(restore) do
-            if screen and screen.Parent then
-                pcall(function() screen.Enabled = true end)
-            end
-        end
-    end, #restore
-end
-
 local function voteCount(text)
     local votes, required = tostring(text or ""):match("%((%d+)%s*/%s*(%d+)%)")
     return tonumber(votes), tonumber(required)
@@ -10969,11 +10899,6 @@ local function accepted(endFrame, container, button, beforeText)
     return false
 end
 
-local function waitOneFrame()
-    local ok = pcall(function() RunService.Heartbeat:Wait() end)
-    if not ok then task.wait() end
-end
-
 local function livePairStillValid(playerGui, endFrame, container, restartButton, returnButton)
     if not playerGui
         or not endFrame or not endFrame.Parent
@@ -10991,65 +10916,79 @@ local function livePairStillValid(playerGui, endFrame, container, restartButton,
     return rBase and rActive and rOnScreen and bBase and bActive and bOnScreen
 end
 
-local function vimClick(endFrame, container, button, returnButton, attempt)
-    local okService, vim = pcall(game.GetService, game, "VirtualInputManager")
-    if not okService or not vim then
-        return false, "VirtualInputManager unavailable", "failed"
+local function fireConnectionObject(connection)
+    if not connection then return false end
+    if type(connection.Fire) == "function" and pcall(connection.Fire, connection) then
+        return true
     end
-
-    local heldOk, held = pcall(
-        UserInputService.IsMouseButtonPressed,
-        UserInputService,
-        Enum.UserInputType.MouseButton1
-    )
-    if heldOk and held == true then
-        return false, "physical Mouse1 held", "blocked"
+    if type(connection.Function) == "function" and pcall(connection.Function) then
+        return true
     end
+    return false
+end
 
-    local restore, suppressed = suppressCTDIG()
-    waitOneFrame()
-
+local function directClick(endFrame, container, button, returnButton, attempt)
     local playerGui = player and player:FindFirstChildOfClass("PlayerGui")
     if not livePairStillValid(playerGui, endFrame, container, button, returnButton) then
-        restore()
         return false, "end-screen pair changed before click", "changed"
     end
 
-    local intersects, centerOnScreen, position, size, viewport, center = readButtonGeometry(button)
+    local intersects, centerOnScreen, position, size, viewport = readButtonGeometry(button)
     if not intersects or not centerOnScreen then
-        restore()
         return false, geometryText(position, size, viewport), "offscreen"
     end
 
-    print(string.format(
-        "[XOMA V40] Auto Retry click %d | %s",
-        attempt,
-        geometryText(position, size, viewport)
-    ))
+    local candidates = {
+        { name = "MouseButton1Click", signal = button.MouseButton1Click },
+        { name = "Activated", signal = button.Activated },
+    }
 
-    local ok, err = pcall(function()
-        vim:SendMouseButtonEvent(center.X, center.Y, 0, true, game, 0)
-        task.wait(0.04)
-        vim:SendMouseButtonEvent(center.X, center.Y, 0, false, game, 0)
-    end)
-
-    if not ok then
-        pcall(function()
-            vim:SendMouseButtonEvent(center.X, center.Y, 0, false, game, 0)
-        end)
+    local getConnections = executorFunction("getconnections")
+    if getConnections then
+        for _, candidate in ipairs(candidates) do
+            local okConnections, signalConnections = pcall(getConnections, candidate.signal)
+            if okConnections and type(signalConnections) == "table" then
+                local fired = 0
+                for _, connection in ipairs(signalConnections) do
+                    if fireConnectionObject(connection) then
+                        fired = fired + 1
+                    end
+                end
+                if fired > 0 then
+                    local detail = candidate.name .. ":connections=" .. tostring(fired)
+                    print(string.format(
+                        "[XOMA V40] Auto Retry direct click %d | %s | %s",
+                        attempt,
+                        detail,
+                        geometryText(position, size, viewport)
+                    ))
+                    return true, detail, "sent"
+                end
+            end
+        end
     end
-    restore()
 
-    if not ok then
-        return false, "VIM failed: " .. tostring(err), "failed"
+    local fireSignal = executorFunction("firesignal")
+    if fireSignal then
+        -- Without getconnections we cannot know which completed-click signal the
+        -- game subscribed to. Alternate rather than firing both and risking a
+        -- duplicate vote from one attempt.
+        local candidate = candidates[((attempt - 1) % #candidates) + 1]
+        local ok, err = pcall(fireSignal, candidate.signal)
+        if ok then
+            local detail = candidate.name .. ":firesignal"
+            print(string.format(
+                "[XOMA V40] Auto Retry direct click %d | %s | %s",
+                attempt,
+                detail,
+                geometryText(position, size, viewport)
+            ))
+            return true, detail, "sent"
+        end
+        return false, candidate.name .. " firesignal failed: " .. tostring(err), "failed"
     end
 
-    return true, string.format(
-        "VIM @ %.0f,%.0f | CTDIG suppressed=%d",
-        center.X,
-        center.Y,
-        suppressed
-    ), "sent"
+    return false, "executor has no getconnections/firesignal", "failed"
 end
 
 local function confirmRestart(why)
@@ -11079,8 +11018,8 @@ local function stopReplayForRealEnd()
     end
 end
 
--- Forced Auto Retry owns Restart. The old handler is only retained for the
--- non-forced mode; using it here would re-enable its stale result/firesignal path.
+-- Forced Auto Retry owns Restart. The old handler is retained only for
+-- non-forced mode. Result values remain webhook diagnostics, never a Retry gate.
 session.recorder.handleEndAction = function(...)
     if not session.alive then return end
     if session.forceAutoRetry ~= true then
@@ -11195,7 +11134,7 @@ task.spawn(function()
 
         control.busy = true
         local attempt = control.attempts + 1
-        local ok, detail, status = vimClick(
+        local ok, detail, status = directClick(
             endFrame,
             container,
             restartButton,
@@ -11207,7 +11146,7 @@ task.spawn(function()
             logOffscreen(restartButton)
             control.busy = false
             continue
-        elseif status == "blocked" or status == "changed" then
+        elseif status == "changed" then
             control.busy = false
             continue
         end
@@ -11233,15 +11172,15 @@ task.spawn(function()
                 task.wait(0.04)
             until os.clock() >= deadline
         else
-            warn("[XOMA V40] Auto Retry click failed | " .. tostring(detail))
+            warn("[XOMA V40] Auto Retry direct click failed | " .. tostring(detail))
         end
 
         control.busy = false
     end
 end)
 
-session.endClickBuild = "PASS31-AUTORETRY-REAL-END-V40"
-print("[XOMA V40] Auto Retry viewport-safe watcher installed")
+session.endClickBuild = "PASS32-AUTORETRY-DIRECT-CLICK-V40"
+print("[XOMA V40] Auto Retry direct-button watcher installed")
 
 return session.XOMA]===]
     local chunk, err = loadstring(source)

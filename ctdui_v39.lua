@@ -1,5 +1,5 @@
 -- XOMA / CTDIG cache-busted bootstrap
--- Build: PASS37-WEBHOOK-SESSION-FIX-V39
+-- Build: PASS38-W0-START-GATE-V39
 -- V33 replay base is frozen to one source snapshot, then V39 applies only the
 -- existing input/reliability/webhook layers plus the authoritative end watcher.
 
@@ -97,13 +97,20 @@ XOMA = runSource(
     "XOMA V40 webhook session accounting fix"
 ) or XOMA
 
+-- Wave 0 timing only: wait until Voting.Start=true, but release before the
+-- countdown reaches zero so the first recorded W0 Place runs in the real prep window.
+XOMA = runSource(
+    "https://raw.githubusercontent.com/evilxoma/xomahub/e7f6ef965d9e87ad6a1e1c9ccae328c04238d19b/patches/w0_v31.lua",
+    "XOMA Wave 0 start-gate hotfix"
+) or XOMA
+
 XOMA = runSource(
     "https://raw.githubusercontent.com/evilxoma/xomahub/0867a0957c5833a4fda30f7f357d73b766fe3c85/patches/endclick_v39.lua",
     "XOMA V39 legacy end-screen watcher"
 ) or XOMA
 
--- IMPORTANT: PASS36 Auto Retry remains pinned exactly as-is. Webhook V40 does
--- not modify any endClick*/Restart state or injector API behavior.
+-- IMPORTANT: PASS36 Auto Retry remains pinned exactly as-is. W0/Webhook patches
+-- do not modify any endClick*/Restart state or injector API behavior.
 XOMA = runSource(
     "https://raw.githubusercontent.com/evilxoma/xomahub/b73de5197c78d2d42f3bce06ffafa03de6fda6ad/patches/endclick_v39_hotfix.lua",
     "XOMA V39 injector-API Auto Retry hotfix"
@@ -112,9 +119,9 @@ XOMA = runSource(
 local environment = typeof(getgenv) == "function" and getgenv() or _G
 local session = environment.CTDIG_SESSION
 if type(session) == "table" then
-    session.bootstrapBuild = "PASS37-WEBHOOK-SESSION-FIX-V39"
+    session.bootstrapBuild = "PASS38-W0-START-GATE-V39"
     session.bootstrapCoreRef = CORE_REF
 end
 
-print("[XOMA V39] bootstrap loaded | webhook stats fixed | PASS36 Auto Retry unchanged")
+print("[XOMA V39] bootstrap loaded | W0 start fixed | webhook fixed | PASS36 Auto Retry unchanged")
 return XOMA

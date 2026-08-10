@@ -1,7 +1,7 @@
 -- XOMA / CTDIG cache-busted bootstrap
--- Build: PASS29B-DIRECT-AUTORETRY-V39
+-- Build: PASS29C-ENDSCREEN-AUTORETRY-V39
 -- Pinned V33 replay base + click-through + safe V39 reliability + live EndFrame
--- webhook gate + direct visible Restart watcher.
+-- webhook gate + real end-screen Restart watcher.
 
 local function runSource(url, label)
     local source = game:HttpGet(url)
@@ -18,7 +18,7 @@ local XOMA = runSource(
 )
 
 XOMA = runSource(
-    "https://raw.githubusercontent.com/evilxoma/xomahub/refs/heads/main/patches/input_v32.lua?build=PASS29B-DIRECT-AUTORETRY-V39",
+    "https://raw.githubusercontent.com/evilxoma/xomahub/refs/heads/main/patches/input_v32.lua?build=PASS29C-ENDSCREEN-AUTORETRY-V39",
     "XOMA click-through"
 ) or XOMA
 
@@ -33,15 +33,15 @@ XOMA = runSource(
 ) or XOMA
 
 XOMA = runSource(
-    "https://raw.githubusercontent.com/evilxoma/xomahub/f190fb2781bf95b2cdf14bfa061d71d8276d26ad/patches/endclick_v39.lua",
-    "XOMA V39 direct end-click"
+    "https://raw.githubusercontent.com/evilxoma/xomahub/80f51981d9cb503c88a09de4154e346b91535ea5/patches/endclick_v39.lua",
+    "XOMA V39 real end-screen click"
 ) or XOMA
 
 local environment = typeof(getgenv) == "function" and getgenv() or _G
 local session = environment.CTDIG_SESSION
 if type(session) == "table" then
-    session.bootstrapBuild = "PASS29B-DIRECT-AUTORETRY-V39"
+    session.bootstrapBuild = "PASS29C-ENDSCREEN-AUTORETRY-V39"
 end
 
-print("[XOMA V39] cache-busted bootstrap loaded | direct Auto Retry")
+print("[XOMA V39] cache-busted bootstrap loaded | real end-screen Auto Retry")
 return XOMA

@@ -1,4 +1,5 @@
 from pathlib import Path
+import json
 import re
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -80,14 +81,17 @@ def v40_patch_source(path: Path, source: str) -> str:
 
 
 def chunk_runner(label: str, source: str) -> str:
+    # json.dumps gives a safe double-quoted Lua string for an ASCII label without
+    # mutating any quote characters inside the embedded source itself.
+    label_lua = json.dumps(label)
     return (
-        f"do\n"
+        "do\n"
         f"    local source = {lua_long_string(source)}\n"
-        f"    local chunk, err = loadstring(source)\n"
-        f"    if not chunk then error({label!r} .. ' compile failed: ' .. tostring(err)) end\n"
-        f"    XOMA = chunk() or XOMA\n"
-        f"end\n\n"
-    ).replace("'", '"')
+        "    local chunk, err = loadstring(source)\n"
+        f"    if not chunk then error({label_lua} .. \" compile failed: \" .. tostring(err)) end\n"
+        "    XOMA = chunk() or XOMA\n"
+        "end\n\n"
+    )
 
 
 def main() -> None:
@@ -114,7 +118,6 @@ def main() -> None:
         "-- Runtime has no xomahub src/patches HttpGet dependencies; all active\n"
         "-- CTDIG source and patches are embedded below as isolated loadstring chunks.\n\n"
         + base
-        + "local XOMA = XOMA\n\n"
         + "".join(chunks)
         + "local environment = typeof(getgenv) == \"function\" and getgenv() or _G\n"
         + "local activeSession = environment.CTDIG_SESSION\n"

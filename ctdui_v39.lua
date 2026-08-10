@@ -39,11 +39,19 @@ local function runPinnedBase()
         "https://raw.githubusercontent.com/evilxoma/xomahub/" .. CORE_REF .. "/patches/"
     )
 
+    -- Recorder strategies created while V39 is loaded must point straight back
+    -- to V39; do not depend on the later reliability monitor to rewrite V33.
+    source = source:gsub(
+        "https://raw%.githubusercontent%.com/evilxoma/xomahub/refs/heads/main/ctdui_v33%.lua",
+        "https://raw.githubusercontent.com/evilxoma/xomahub/refs/heads/main/ctdui_v39.lua"
+    )
+
     -- Add one V39-only escape hatch for the end watcher. It changes no replay
     -- action implementation; it only flips the same local stop flags used by
     -- the existing Stop Replay/end-action paths once a REAL end screen exists.
     local replayStopPatch = [=[
-coreSource = coreSource:gsub(
+local replayStopHookCount
+coreSource, replayStopHookCount = coreSource:gsub(
     "session%.recorder = {%s+bindGameSources = bindGameSources,",
     [[session.stopReplayForEndScreen = function(reason)
         replayStopRequested = true
@@ -59,6 +67,9 @@ coreSource = coreSource:gsub(
         bindGameSources = bindGameSources,]],
     1
 )
+if replayStopHookCount ~= 1 then
+    error("XOMA V39 replay-stop hook injection failed")
+end
 
 ]=]
 

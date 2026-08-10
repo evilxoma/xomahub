@@ -1,5 +1,5 @@
 -- XOMA / CTDIG cache-busted bootstrap
--- Build: PASS29C-ENDSCREEN-AUTORETRY-V39
+-- Build: PASS30-AUTORETRY-VIEWPORT-V39
 -- Pinned V33 replay base + click-through + safe V39 reliability + live EndFrame
 -- webhook gate + real end-screen Restart watcher.
 
@@ -18,7 +18,7 @@ local XOMA = runSource(
 )
 
 XOMA = runSource(
-    "https://raw.githubusercontent.com/evilxoma/xomahub/refs/heads/main/patches/input_v32.lua?build=PASS29C-ENDSCREEN-AUTORETRY-V39",
+    "https://raw.githubusercontent.com/evilxoma/xomahub/refs/heads/main/patches/input_v32.lua?build=PASS30-AUTORETRY-VIEWPORT-V39",
     "XOMA click-through"
 ) or XOMA
 
@@ -33,15 +33,15 @@ XOMA = runSource(
 ) or XOMA
 
 XOMA = runSource(
-    "https://raw.githubusercontent.com/evilxoma/xomahub/80f51981d9cb503c88a09de4154e346b91535ea5/patches/endclick_v39.lua",
+    "https://raw.githubusercontent.com/evilxoma/xomahub/0a2ed0fb8fe74243930e145f95aa5e35ca22702b/patches/endclick_v39.lua",
     "XOMA V39 real end-screen click"
 ) or XOMA
 
 local environment = typeof(getgenv) == "function" and getgenv() or _G
 local session = environment.CTDIG_SESSION
 if type(session) == "table" then
-    session.bootstrapBuild = "PASS29C-ENDSCREEN-AUTORETRY-V39"
+    session.bootstrapBuild = "PASS30-AUTORETRY-VIEWPORT-V39"
 end
 
-print("[XOMA V39] cache-busted bootstrap loaded | real end-screen Auto Retry")
+print("[XOMA V39] cache-busted bootstrap loaded | viewport-safe Auto Retry")
 return XOMA

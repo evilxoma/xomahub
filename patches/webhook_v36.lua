@@ -1,8 +1,9 @@
 -- XOMA / CTDIG webhook lifecycle gate
--- Build: PASS26-WEBHOOK-ROUND-GATE-V36
+-- Build: PASS26B-WEBHOOK-FRESH-ROUND-GATE-V36
 -- Ignore stale Triumph/Defeat values and stale EndFrame state at bootstrap or
 -- immediately after Restart. A webhook result is accepted only after this
--- client has observed the CURRENT round actually reach Wave >= 1.
+-- client has observed the CURRENT round reach Wave >= 1 and also observed a
+-- clean no-result-screen state for that round.
 
 local environment = typeof(getgenv) == "function" and getgenv() or _G
 local session = environment.CTDIG_SESSION
@@ -12,7 +13,7 @@ if type(session) ~= "table" or type(session.observeWebhookResult) ~= "function" 
 end
 
 if session.webhookV36Installed == true then
-    session.webhookBuild = "PASS26-WEBHOOK-ROUND-GATE-V36"
+    session.webhookBuild = "PASS26B-WEBHOOK-FRESH-ROUND-GATE-V36"
     return session.XOMA
 end
 
@@ -21,6 +22,7 @@ local originalObserve = session.observeWebhookResult
 
 session.webhookRoundGateV36 = {
     armed = false,
+    sawClearState = false,
     lastWave = 0,
     resultConsumed = false,
 }
@@ -61,19 +63,18 @@ end
 local function refreshRoundGate()
     local wave = currentWave()
 
-    -- A real active round has now been observed. This is deliberately stricter
-    -- than checking PlayerGameResult because that Value can stay stale from a
-    -- previous round during bootstrap/restart.
-    if wave >= 1 and not gate.armed then
+    if wave >= 1 and not gate.armed and not gate.resultConsumed then
         gate.armed = true
-        gate.resultConsumed = false
+        gate.sawClearState = false
         print("[XOMA V36] Webhook armed for current round at W" .. tostring(wave))
     end
 
-    -- Restart returns the wave to pre-game. Once a result has been consumed,
-    -- keep webhook disarmed until the NEXT round reaches W1.
+    -- A consumed result stays disarmed through Restart/pre-game. When the next
+    -- round actually reaches W1, allow it to arm again.
     if gate.resultConsumed and wave <= 0 then
+        gate.resultConsumed = false
         gate.armed = false
+        gate.sawClearState = false
     end
 
     gate.lastWave = wave
@@ -85,21 +86,17 @@ session.observeWebhookResult = function(endFrame, result, ...)
     result = tostring(result or "")
     local isResult = result == "Defeat" or result == "Triumph"
 
-    if not isResult then
-        -- Preserve the original observer's idle/reset behavior, but never feed
-        -- it a stale result while the current round is not armed.
+    if not isResult or not endFrameLooksLive(endFrame) then
+        if gate.armed then
+            gate.sawClearState = true
+        end
         return originalObserve(nil, nil, ...)
     end
 
-    if not gate.armed then
-        return originalObserve(nil, nil, ...)
-    end
-
-    if gate.resultConsumed then
-        return
-    end
-
-    if not endFrameLooksLive(endFrame) then
+    -- Stale PlayerGameResult/EndFrame from bootstrap cannot pass this gate. The
+    -- current round must first have reached W1 and then been observed with no
+    -- live result screen at least once.
+    if not gate.armed or not gate.sawClearState or gate.resultConsumed then
         return originalObserve(nil, nil, ...)
     end
 
@@ -109,12 +106,10 @@ session.observeWebhookResult = function(endFrame, result, ...)
     return originalObserve(endFrame, result, ...)
 end
 
--- Heartbeat is unnecessary; handleEndAction already calls the observer often.
--- Still seed the gate if V36 was injected mid-match after W1.
 refreshRoundGate()
 
 session.webhookV36Installed = true
-session.webhookBuild = "PASS26-WEBHOOK-ROUND-GATE-V36"
-print("[XOMA V36] Webhook stale-result gate installed")
+session.webhookBuild = "PASS26B-WEBHOOK-FRESH-ROUND-GATE-V36"
+print("[XOMA V36] Webhook fresh-round gate installed")
 
 return session.XOMA

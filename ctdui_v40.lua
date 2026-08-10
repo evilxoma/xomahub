@@ -10578,10 +10578,12 @@ return session.XOMA
 end
 
 do
-    local source = [===[-- XOMA Auto Retry direct visible-button watcher
--- Build: PASS29B-AUTORESTART-DIRECT-V40
--- A genuinely visible Restart button is itself the authoritative end-screen
--- signal. Do not depend on PlayerGameResult/webhook state or the old core click.
+    local source = [===[-- XOMA Auto Retry authoritative end-screen watcher
+-- Build: PASS29C-AUTORESTART-ENDSCREEN-V40
+-- The in-match Restart vote can exist before the match is actually over.
+-- Auto Retry is armed only when BOTH Restart and Return/Exit to Lobby are
+-- genuinely visible in the same EndFrame. This prevents startup clicks from
+-- consuming retry attempts before the real result screen appears.
 
 local environment = typeof(getgenv) == "function" and getgenv() or _G
 local session = environment.CTDIG_SESSION
@@ -10600,12 +10602,12 @@ local player = Players.LocalPlayer
 local originalHandle = session.recorder.handleEndAction
 
 session.endClickV40 = {
-    button = nil,
+    endFrame = nil,
+    restart = nil,
     attempts = 0,
     lastAttempt = 0,
     busy = false,
     confirmed = false,
-    lastDiag = 0,
 }
 local control = session.endClickV40
 
@@ -10644,40 +10646,59 @@ local function buttonText(button)
     return table.concat(parts, " | ")
 end
 
+local function liveButton(button, playerGui)
+    return button
+        and button:IsA("GuiButton")
+        and button.Visible == true
+        and button.AbsoluteSize.X > 1
+        and button.AbsoluteSize.Y > 1
+        and hierarchyVisible(button, playerGui)
+end
+
 local function looksLikeRestart(button)
     if not button or not button:IsA("GuiButton") then return false end
     if button.Name == "Restart" then return true end
     return string.lower(buttonText(button)):find("restart", 1, true) ~= nil
 end
 
-local function findLiveRestart(playerGui)
-    if not playerGui then return nil, nil end
+local function looksLikeReturn(button)
+    if not button or not button:IsA("GuiButton") then return false end
+    if button.Name == "Return" then return true end
+    local text = string.lower(buttonText(button))
+    return text:find("exit to lobby", 1, true) ~= nil
+        or text:find("return to lobby", 1, true) ~= nil
+        or text:find("back to lobby", 1, true) ~= nil
+end
 
-    local bestFrame
-    local bestButton
-    local bestArea = -1
+local function findLiveEndActions(playerGui)
+    if not playerGui then return nil, nil, nil end
 
+    local byFrame = {}
     for _, object in ipairs(playerGui:GetDescendants()) do
-        if looksLikeRestart(object) then
+        if object:IsA("GuiButton") then
             local endFrame = object:FindFirstAncestor("EndFrame")
-            if endFrame
-                and object.Visible == true
-                and object.AbsoluteSize.X > 1
-                and object.AbsoluteSize.Y > 1
-                and hierarchyVisible(object, playerGui)
-                and hierarchyVisible(endFrame, playerGui)
-            then
-                local area = object.AbsoluteSize.X * object.AbsoluteSize.Y
-                if area > bestArea then
-                    bestArea = area
-                    bestFrame = endFrame
-                    bestButton = object
+            if endFrame and hierarchyVisible(endFrame, playerGui) and liveButton(object, playerGui) then
+                local entry = byFrame[endFrame]
+                if not entry then
+                    entry = { restart = nil, returnButton = nil }
+                    byFrame[endFrame] = entry
+                end
+                if looksLikeRestart(object) then
+                    entry.restart = object
+                elseif looksLikeReturn(object) then
+                    entry.returnButton = object
                 end
             end
         end
     end
 
-    return bestFrame, bestButton
+    for endFrame, entry in pairs(byFrame) do
+        if entry.restart and entry.returnButton then
+            return endFrame, entry.restart, entry.returnButton
+        end
+    end
+
+    return nil, nil, nil
 end
 
 local function readResult()
@@ -10793,8 +10814,6 @@ local function vimClick(button)
     task.wait()
 
     local ok, err = pcall(function()
-        -- Some game buttons only become input-ready after hover. This moves only
-        -- VirtualInputManager's pointer; it does not move the physical OS cursor.
         pcall(function()
             vim:SendMouseMoveEvent(center.X, center.Y, game)
         end)
@@ -10819,22 +10838,23 @@ local function vimClick(button)
 end
 
 local function resetControl()
-    control.button = nil
+    control.endFrame = nil
+    control.restart = nil
     control.attempts = 0
     control.lastAttempt = 0
     control.busy = false
     control.confirmed = false
 end
 
--- Prevent the old core AutoRetry branch from racing our physical click. While a
--- real Restart is visible, keep only webhook bookkeeping here; the watcher below
--- owns the click. During normal gameplay the original handler is preserved.
+-- The old core handler is allowed during normal gameplay. Once the REAL end
+-- screen is present (Restart + Exit to Lobby together), this watcher owns
+-- Restart so the old signal-based click cannot race the physical VIM click.
 session.recorder.handleEndAction = function(...)
     if not session.alive then return end
 
     local playerGui = player and player:FindFirstChildOfClass("PlayerGui")
-    local endFrame, button = findLiveRestart(playerGui)
-    if endFrame and button and session.forceAutoRetry == true then
+    local endFrame, restartButton = findLiveEndActions(playerGui)
+    if endFrame and restartButton and session.forceAutoRetry == true then
         local result = readResult()
         if result and type(session.observeWebhookResult) == "function" then
             pcall(session.observeWebhookResult, endFrame, result)
@@ -10857,22 +10877,26 @@ if session.endClickWatcherV40Installed ~= true then
             end
 
             local playerGui = player and player:FindFirstChildOfClass("PlayerGui")
-            local endFrame, button = findLiveRestart(playerGui)
-            if not endFrame or not button then
-                if control.button ~= nil then
+            local endFrame, restartButton, returnButton = findLiveEndActions(playerGui)
+            if not endFrame or not restartButton or not returnButton then
+                if control.endFrame ~= nil then
                     resetControl()
                 end
                 continue
             end
 
-            if control.button ~= button then
+            if control.endFrame ~= endFrame or control.restart ~= restartButton then
                 resetControl()
-                control.button = button
-                print("[XOMA V40] Live Restart button detected | " .. buttonText(button))
+                control.endFrame = endFrame
+                control.restart = restartButton
+                print(
+                    "[XOMA V40] Real end screen detected | Restart=" .. buttonText(restartButton)
+                        .. " | Return=" .. buttonText(returnButton)
+                )
             end
 
-            local beforeText = buttonText(button)
-            local done, why = accepted(endFrame, button, beforeText)
+            local beforeText = buttonText(restartButton)
+            local done, why = accepted(endFrame, restartButton, beforeText)
             if done then
                 if not control.confirmed then
                     control.confirmed = true
@@ -10881,7 +10905,7 @@ if session.endClickWatcherV40Installed ~= true then
                 continue
             end
 
-            if control.confirmed or control.busy or control.attempts >= 3 then
+            if control.confirmed or control.busy then
                 continue
             end
 
@@ -10892,11 +10916,11 @@ if session.endClickWatcherV40Installed ~= true then
 
             control.busy = true
             control.attempts = control.attempts + 1
-            local ok, detail = vimClick(button)
+            local ok, detail = vimClick(restartButton)
             control.lastAttempt = os.clock()
 
             print(string.format(
-                "[XOMA V40] Auto Retry direct click %d | sent=%s | before=%s | %s",
+                "[XOMA V40] Auto Retry end-screen click %d | sent=%s | before=%s | %s",
                 control.attempts,
                 tostring(ok),
                 beforeText,
@@ -10906,7 +10930,7 @@ if session.endClickWatcherV40Installed ~= true then
             if ok then
                 local deadline = os.clock() + 1.0
                 repeat
-                    local acceptedNow, acceptedWhy = accepted(endFrame, button, beforeText)
+                    local acceptedNow, acceptedWhy = accepted(endFrame, restartButton, beforeText)
                     if acceptedNow then
                         control.confirmed = true
                         print("[XOMA V40] Auto Retry confirmed | " .. tostring(acceptedWhy))
@@ -10921,8 +10945,8 @@ if session.endClickWatcherV40Installed ~= true then
     end)
 end
 
-session.endClickBuild = "PASS29B-AUTORESTART-DIRECT-V40"
-print("[XOMA V40] Auto Retry direct Restart watcher installed")
+session.endClickBuild = "PASS29C-AUTORESTART-ENDSCREEN-V40"
+print("[XOMA V40] Auto Retry real-end-screen watcher installed")
 
 return session.XOMA
 ]===]

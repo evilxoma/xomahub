@@ -1,5 +1,5 @@
 -- XOMA / CTDIG cache-busted bootstrap
--- Build: PASS33-AUTORETRY-CLICK-CASCADE-V39
+-- Build: PASS34-AUTORETRY-REAL-RESTART-V39
 -- V33 replay base is frozen to one source snapshot, then V39 applies only the
 -- existing input/reliability/webhook layers plus the authoritative end watcher.
 
@@ -109,12 +109,17 @@ XOMA = runSource(
     "XOMA V39 click-cascade end-screen click"
 ) or XOMA
 
+XOMA = runSource(
+    "https://raw.githubusercontent.com/evilxoma/xomahub/68a157804273463b5ccd67c04708676730a16490/patches/endclick_v39_hotfix.lua",
+    "XOMA V39 real Restart hotfix"
+) or XOMA
+
 local environment = typeof(getgenv) == "function" and getgenv() or _G
 local session = environment.CTDIG_SESSION
 if type(session) == "table" then
-    session.bootstrapBuild = "PASS33-AUTORETRY-CLICK-CASCADE-V39"
+    session.bootstrapBuild = "PASS34-AUTORETRY-REAL-RESTART-V39"
     session.bootstrapCoreRef = CORE_REF
 end
 
-print("[XOMA V39] cache-busted bootstrap loaded | click-cascade Auto Retry")
+print("[XOMA V39] cache-busted bootstrap loaded | real Restart Auto Retry")
 return XOMA

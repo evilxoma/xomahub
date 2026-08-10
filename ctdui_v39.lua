@@ -105,7 +105,7 @@ XOMA = runSource(
 ) or XOMA
 
 XOMA = runSource(
-    "https://raw.githubusercontent.com/evilxoma/xomahub/fa6a5b6fc859114f8d5974dcd99a4b2083ac73ae/patches/endclick_v39.lua",
+    "https://raw.githubusercontent.com/evilxoma/xomahub/7311d28404c3d4b9f3f7f218a2cb0974300ebfa5/patches/endclick_v39.lua",
     "XOMA V39 real end-screen click"
 ) or XOMA
 

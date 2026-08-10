@@ -6,6 +6,7 @@ ROOT = Path(__file__).resolve().parents[1]
 OUT = ROOT / "ctdui_v40.lua"
 
 CORE_PARTS = [ROOT / "src" / f"part{i:02d}.lua.txt" for i in range(1, 17)]
+AUTOEXEC_V17_PARTS = [ROOT / "patches" / "v17" / f"part{i:02d}.lua.txt" for i in range(1, 4)]
 PATCHES = [
     ROOT / "patches" / "autoexec_v17.lua",
     ROOT / "patches" / "pregame_v19.lua",
@@ -69,6 +70,11 @@ def inline_ready_into_player(player_source: str, ready_source: str) -> str:
 
 
 def v40_patch_source(path: Path, source: str) -> str:
+    # autoexec_v17 is only a three-part network loader. Embed its actual patch
+    # body instead so V40 does not depend on patches/v17 at runtime.
+    if path.name == "autoexec_v17.lua":
+        source = "\n".join(part.read_text(encoding="utf-8") for part in AUTOEXEC_V17_PARTS)
+
     # V39's three active top-level patches become V40 in the monolith. Older
     # compatibility patches keep their historic internal build names so their
     # idempotency/state checks remain unchanged.

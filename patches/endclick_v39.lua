@@ -49,6 +49,7 @@ local function resetControl()
     control.missingSince = 0
     control.exhaustedLogged = false
     control.replayStopped = false
+    control.sentAtLeastOnce = false
 end
 
 resetControl()
@@ -539,7 +540,7 @@ task.spawn(function()
                 logOffscreen(ignoredRestart)
             end
 
-            if control.attempts > 0 and not control.confirmed then
+            if control.sentAtLeastOnce and not control.confirmed then
                 local done, why = accepted(
                     control.endFrame,
                     control.container,
@@ -583,7 +584,7 @@ task.spawn(function()
         if control.confirmed then continue end
 
         local beforeText = buttonText(restartButton)
-        if control.attempts > 0 and control.beforeText then
+        if control.sentAtLeastOnce and control.beforeText then
             local done, why = accepted(endFrame, container, restartButton, control.beforeText)
             if done then
                 confirmRestart(why)
@@ -633,9 +634,10 @@ task.spawn(function()
 
         control.attempts = attempt
         control.lastAttempt = os.clock()
-        control.beforeText = beforeText
 
         if ok then
+            control.sentAtLeastOnce = true
+            control.beforeText = beforeText
             local deadline = os.clock() + 1.25
             repeat
                 local acceptedNow, acceptedWhy = accepted(

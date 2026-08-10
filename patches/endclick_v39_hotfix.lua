@@ -1,76 +1,61 @@
--- XOMA Auto Retry real-button hotfix
--- Build: PASS35-AUTORETRY-DIRECT-SIGNAL-V39
+-- XOMA Auto Retry injector-API-only hotfix
+-- Build: PASS36-AUTORETRY-INJECTOR-API-V39
 -- Scope: Auto Retry only. Recorder/place/upgrade/skip/ready/difficulty untouched.
 --
--- PASS34 proved that the real PlayerGui.EndFrame.RoundFrame.Restart is found and
--- that VIM input is sent, but a successful SendMouseButtonEvent only means the
--- input packet was emitted. CoreGui (notably the developer console) can sit above
--- PlayerGui and consume that click. PASS35 therefore drives the Restart button's
--- own live RBXScriptSignal connections FIRST. Coordinate input is only a fallback.
+-- No VirtualInputManager. No coordinate clicks. No physical mouse movement.
+-- The exact live PlayerGui.EndFrame.RoundFrame.Restart button is activated only
+-- through executor/injector APIs (getconnections/firesignal/keypress aliases).
 
 local environment = typeof(getgenv) == "function" and getgenv() or _G
 local session = environment.CTDIG_SESSION
 
 if type(session) ~= "table" then
-    error("XOMA V39 Auto Retry hotfix: CTDIG session unavailable")
+    error("XOMA V39 Auto Retry injector hotfix: CTDIG session unavailable")
 end
 
 local Players = game:GetService("Players")
-local StarterGui = game:GetService("StarterGui")
 local GuiService = game:GetService("GuiService")
-local UserInputService = game:GetService("UserInputService")
-local Workspace = game:GetService("Workspace")
 local player = Players.LocalPlayer
 
--- Stop all older end-click owners. Only this watcher may drive Restart.
+-- Kill every older end-screen watcher. PASS36 is the only Restart owner.
 session.endClickWatcherSerialV39 = (tonumber(session.endClickWatcherSerialV39) or 0) + 1
 session.endClickHotfixSerialV39 = (tonumber(session.endClickHotfixSerialV39) or 0) + 1
-local watcherSerial = session.endClickHotfixSerialV39
+session.endClickInjectorSerialV39 = (tonumber(session.endClickInjectorSerialV39) or 0) + 1
+local watcherSerial = session.endClickInjectorSerialV39
 
 local POLL = 0.10
-local METHOD_CONFIRM_WAIT = 1.15
-local NO_METHOD_DELAY = 0.15
-local METHOD_CYCLE_DELAY = 1.50
-local NEW_ROUND_RESET = 2.50
+local RETRY_DELAY = 0.90
+local CONFIRM_WINDOW = 0.75
+local NEW_ROUND_RESET = 2.0
 
-local control = session.endClickRealV39
+local control = session.endClickInjectorV39
 if type(control) ~= "table" then
     control = {}
-    session.endClickRealV39 = control
+    session.endClickInjectorV39 = control
 end
 
 local function resetControl()
     control.endFrame = nil
     control.restart = nil
-    control.beforeText = nil
-    control.sent = false
+    control.beforeText = ""
+    control.attempts = 0
+    control.nextAttempt = 0
     control.accepted = false
     control.acceptedAt = 0
-    control.nextAttempt = 0
-    control.attempts = 0
-    control.methodIndex = 1
     control.replayStopped = false
 end
 
 resetControl()
 
-local function executorFunction(name)
-    local value = rawget(environment, name) or rawget(_G, name)
-    return type(value) == "function" and value or nil
-end
-
-local function hierarchyVisible(object, stopAt)
-    local current = object
-    while current and current ~= stopAt do
-        if current:IsA("GuiObject") and current.Visible == false then
-            return false
+local function executorFunction(names)
+    if type(names) == "string" then names = { names } end
+    for _, name in ipairs(names) do
+        local value = rawget(environment, name) or rawget(_G, name)
+        if type(value) == "function" then
+            return value, name
         end
-        if current:IsA("LayerCollector") and current.Enabled == false then
-            return false
-        end
-        current = current.Parent
     end
-    return current == stopAt
+    return nil, nil
 end
 
 local function buttonText(button)
@@ -80,9 +65,9 @@ local function buttonText(button)
         local text = tostring(button.Text or "")
         if text ~= "" then parts[#parts + 1] = text end
     end
-    for _, descendant in ipairs(button:GetDescendants()) do
-        if descendant:IsA("TextLabel") or descendant:IsA("TextButton") then
-            local text = tostring(descendant.Text or "")
+    for _, object in ipairs(button:GetDescendants()) do
+        if object:IsA("TextLabel") or object:IsA("TextButton") then
+            local text = tostring(object.Text or "")
             if text ~= "" then parts[#parts + 1] = text end
         end
     end
@@ -94,39 +79,10 @@ local function voteCount(text)
     return tonumber(votes), tonumber(required)
 end
 
-local function geometry(button)
-    local camera = Workspace.CurrentCamera
-    if not button or not button.Parent or not camera then
-        return false, nil
-    end
-
-    local ok, position, size, viewport = pcall(function()
-        return button.AbsolutePosition, button.AbsoluteSize, camera.ViewportSize
-    end)
-    if not ok
-        or typeof(position) ~= "Vector2"
-        or typeof(size) ~= "Vector2"
-        or typeof(viewport) ~= "Vector2"
-        or size.X <= 1 or size.Y <= 1
-        or viewport.X <= 1 or viewport.Y <= 1
-    then
-        return false, nil
-    end
-
-    local center = position + size / 2
-    local centerOnScreen = center.X >= 0
-        and center.Y >= 0
-        and center.X < viewport.X
-        and center.Y < viewport.Y
-
-    return centerOnScreen, center
-end
-
 local function getLiveRestart()
     local playerGui = player and player:FindFirstChildOfClass("PlayerGui")
     if not playerGui then return nil end
 
-    -- Exact hierarchy verified from the supplied game save.
     local endFrame = playerGui:FindFirstChild("EndFrame")
     if not endFrame or not endFrame:IsA("LayerCollector") or endFrame.Enabled ~= true then
         return nil
@@ -134,36 +90,29 @@ local function getLiveRestart()
 
     local roundFrame = endFrame:FindFirstChild("RoundFrame")
     local restart = roundFrame and roundFrame:FindFirstChild("Restart")
-    if not restart or not restart:IsA("GuiButton") then return nil end
-    if restart.Visible ~= true or restart.Active ~= true then return nil end
-    if not hierarchyVisible(restart, playerGui) then return nil end
-
-    local onScreen, center = geometry(restart)
-    if not onScreen then return nil end
-
-    return endFrame, restart, center
-end
-
-local function stopReplayOnce()
-    if control.replayStopped then return end
-    control.replayStopped = true
-    if type(session.stopReplayForEndScreen) == "function" then
-        local ok, err = pcall(session.stopReplayForEndScreen, "real Restart button ready")
-        if not ok then
-            warn("[XOMA V39] Auto Retry replay-stop hook failed | " .. tostring(err))
-        end
+    if not restart or not restart:IsA("GuiButton") then
+        return nil
     end
+
+    -- The supplied game save sets these only when Restart is actually ready.
+    if restart.Visible ~= true or restart.Active ~= true then
+        return nil
+    end
+
+    return endFrame, restart
 end
 
 local function accepted(endFrame, restart, beforeText)
     if not endFrame or not endFrame.Parent then
         return true, "EndFrame disappeared"
     end
+
     if endFrame:FindFirstChild("Restarted", true) then
         return true, "Restarted marker"
     end
+
     if not restart or not restart.Parent then
-        return true, "Restart button disappeared"
+        return true, "Restart disappeared"
     end
 
     local currentText = buttonText(restart)
@@ -181,67 +130,100 @@ local function accepted(endFrame, restart, beforeText)
         return true, "Restart became inactive"
     end
 
-    local playerGui = player and player:FindFirstChildOfClass("PlayerGui")
-    if playerGui and not hierarchyVisible(endFrame, playerGui) then
-        return true, "EndFrame hidden"
-    end
-
     return false
 end
 
-local function fireConnectionObject(connection)
+local function stopReplayOnce()
+    if control.replayStopped then return end
+    control.replayStopped = true
+    if type(session.stopReplayForEndScreen) == "function" then
+        local ok, err = pcall(session.stopReplayForEndScreen, "Restart ready")
+        if not ok then
+            warn("[XOMA V39] replay-stop hook failed | " .. tostring(err))
+        end
+    end
+end
+
+local function invokeConnection(connection, activated)
     if not connection then return false end
-    if type(connection.Fire) == "function" and pcall(connection.Fire, connection) then
-        return true
+
+    if type(connection.Fire) == "function" then
+        if activated then
+            if pcall(connection.Fire, connection, nil, 1) then return true end
+        end
+        if pcall(connection.Fire, connection) then return true end
     end
-    if type(connection.Function) == "function" and pcall(connection.Function) then
-        return true
+
+    if type(connection.Function) == "function" then
+        if activated then
+            if pcall(connection.Function, nil, 1) then return true end
+        end
+        if pcall(connection.Function) then return true end
     end
+
     return false
 end
 
-local function sendConnections(signal, signalName)
-    local getConnections = executorFunction("getconnections")
-    if not getConnections then return false, signalName .. ": getconnections unavailable" end
+local function viaConnections(restart)
+    local getConnections, apiName = executorFunction({
+        "getconnections",
+        "get_signal_cons",
+        "get_signal_connections",
+    })
+    if not getConnections then
+        return false, "getconnections unavailable"
+    end
 
-    local ok, connections = pcall(getConnections, signal)
-    if not ok or type(connections) ~= "table" then
-        return false, signalName .. ": getconnections failed"
+    local signalList = {
+        { name = "MouseButton1Click", signal = restart.MouseButton1Click, activated = false },
+        { name = "Activated", signal = restart.Activated, activated = true },
+    }
+
+    local total = 0
+    local details = {}
+
+    for _, item in ipairs(signalList) do
+        local ok, connections = pcall(getConnections, item.signal)
+        local fired = 0
+        if ok and type(connections) == "table" then
+            for _, connection in ipairs(connections) do
+                if invokeConnection(connection, item.activated) then
+                    fired = fired + 1
+                end
+            end
+        end
+        total = total + fired
+        details[#details + 1] = item.name .. "=" .. tostring(fired)
+    end
+
+    return total > 0, tostring(apiName) .. " | " .. table.concat(details, ",")
+end
+
+local function viaFireSignal(restart)
+    local fireSignal, apiName = executorFunction({ "firesignal", "fire_signal" })
+    if not fireSignal then
+        return false, "firesignal unavailable"
     end
 
     local fired = 0
-    for _, connection in ipairs(connections) do
-        if fireConnectionObject(connection) then fired = fired + 1 end
+    local ok1 = pcall(fireSignal, restart.MouseButton1Click)
+    if ok1 then fired = fired + 1 end
+
+    local ok2 = pcall(fireSignal, restart.Activated, nil, 1)
+    if not ok2 then
+        ok2 = pcall(fireSignal, restart.Activated)
     end
-    if fired <= 0 then
-        return false, signalName .. ": connections=0"
+    if ok2 then fired = fired + 1 end
+
+    return fired > 0, tostring(apiName) .. " | signals=" .. tostring(fired)
+end
+
+local function viaKeypress(restart)
+    local keypress, pressName = executorFunction({ "keypress", "key_press" })
+    local keyrelease, releaseName = executorFunction({ "keyrelease", "key_release" })
+    if not keypress then
+        return false, "keypress unavailable"
     end
-    return true, signalName .. ": connections=" .. tostring(fired)
-end
-
-local function sendFireSignal(signal, signalName)
-    local fireSignal = executorFunction("firesignal")
-    if not fireSignal then return false, signalName .. ": firesignal unavailable" end
-    local ok, err = pcall(fireSignal, signal)
-    if not ok then return false, signalName .. ": " .. tostring(err) end
-    return true, signalName .. ": firesignal"
-end
-
-local function hideDevConsoleForFallback()
-    -- This is intentionally best-effort. If F9/DevConsole is covering the game,
-    -- coordinate input otherwise lands on CoreGui instead of the Restart button.
-    local ok = pcall(function()
-        StarterGui:SetCore("DevConsoleVisible", false)
-    end)
-    if ok then task.wait(0.12) end
-    return ok
-end
-
-local function sendSelectedObject(restart)
-    local okService, vim = pcall(game.GetService, game, "VirtualInputManager")
-    if not okService or not vim then return false, "SelectedObject: VIM unavailable" end
-
-    hideDevConsoleForFallback()
 
     local previous
     pcall(function()
@@ -249,14 +231,15 @@ local function sendSelectedObject(restart)
         GuiService.SelectedObject = restart
     end)
 
-    local ok, err = pcall(function()
-        vim:SendKeyEvent(true, Enum.KeyCode.Return, false, game)
-        task.wait(0.045)
-        vim:SendKeyEvent(false, Enum.KeyCode.Return, false, game)
-    end)
+    -- VK_RETURN = 0x0D. This is executor input API, not VirtualInputManager.
+    local ok, err = pcall(keypress, 0x0D)
+    if keyrelease then
+        task.wait(0.04)
+        pcall(keyrelease, 0x0D)
+    end
 
     task.defer(function()
-        task.wait(0.2)
+        task.wait(0.15)
         pcall(function()
             if GuiService.SelectedObject == restart then
                 GuiService.SelectedObject = previous
@@ -264,141 +247,53 @@ local function sendSelectedObject(restart)
         end)
     end)
 
-    if not ok then return false, "SelectedObject Return failed: " .. tostring(err) end
-    return true, "SelectedObject + Return"
-end
-
-local function sendVIM(restart, center)
-    local heldOk, held = pcall(
-        UserInputService.IsMouseButtonPressed,
-        UserInputService,
-        Enum.UserInputType.MouseButton1
-    )
-    if heldOk and held == true then
-        return false, "VIM: physical Mouse1 held"
-    end
-
-    local okService, vim = pcall(game.GetService, game, "VirtualInputManager")
-    if not okService or not vim then return false, "VIM unavailable" end
-
-    hideDevConsoleForFallback()
-
-    local oldZ
-    pcall(function()
-        oldZ = restart.ZIndex
-        restart.ZIndex = 10000
-    end)
-
-    local onScreen, currentCenter = geometry(restart)
-    center = currentCenter or center
-    if not onScreen or typeof(center) ~= "Vector2" then
-        if oldZ ~= nil then pcall(function() restart.ZIndex = oldZ end) end
-        return false, "VIM: Restart left viewport"
-    end
-
-    local ok, err = pcall(function()
-        vim:SendMouseButtonEvent(center.X, center.Y, 0, true, game, 0)
-        task.wait(0.045)
-        vim:SendMouseButtonEvent(center.X, center.Y, 0, false, game, 0)
-    end)
-
-    if oldZ ~= nil then
-        task.defer(function()
-            task.wait(0.1)
-            pcall(function()
-                if restart and restart.Parent then restart.ZIndex = oldZ end
-            end)
-        end)
-    end
-
     if not ok then
-        pcall(function()
-            vim:SendMouseButtonEvent(center.X, center.Y, 0, false, game, 0)
-        end)
-        return false, "VIM failed: " .. tostring(err)
-    end
-    return true, "VIM real button click"
-end
-
-local function methodTable(restart, center)
-    return {
-        {
-            name = "MouseButton1Click:getconnections",
-            send = function() return sendConnections(restart.MouseButton1Click, "MouseButton1Click") end,
-        },
-        {
-            name = "Activated:getconnections",
-            send = function() return sendConnections(restart.Activated, "Activated") end,
-        },
-        {
-            name = "MouseButton1Click:firesignal",
-            send = function() return sendFireSignal(restart.MouseButton1Click, "MouseButton1Click") end,
-        },
-        {
-            name = "Activated:firesignal",
-            send = function() return sendFireSignal(restart.Activated, "Activated") end,
-        },
-        {
-            name = "SelectedObject+Return",
-            send = function() return sendSelectedObject(restart) end,
-        },
-        {
-            name = "VIM",
-            send = function() return sendVIM(restart, center) end,
-        },
-    }
-end
-
-local function tryNextMethod(endFrame, restart, center)
-    local methods = methodTable(restart, center)
-    if control.methodIndex > #methods then
-        control.methodIndex = 1
-        control.nextAttempt = os.clock() + METHOD_CYCLE_DELAY
-        print("[XOMA V39] Auto Retry methods exhausted | cycling")
-        return false
+        return false, tostring(pressName) .. " failed: " .. tostring(err)
     end
 
-    local method = methods[control.methodIndex]
-    control.methodIndex = control.methodIndex + 1
+    return true, tostring(pressName) .. "/" .. tostring(releaseName or "no-release") .. " VK_RETURN"
+end
+
+local function injectorClick(endFrame, restart)
     control.attempts = (tonumber(control.attempts) or 0) + 1
+    control.beforeText = buttonText(restart)
 
-    -- Snapshot BEFORE signal dispatch. Some handlers update vote text synchronously.
-    local beforeText = buttonText(restart)
-    control.beforeText = beforeText
+    local methods = {
+        { name = "connections", fn = viaConnections },
+        { name = "firesignal", fn = viaFireSignal },
+        { name = "keypress", fn = viaKeypress },
+    }
 
-    local ok, detail = method.send()
-    print(string.format(
-        "[XOMA V39] Auto Retry method %d | %s | %s",
-        control.attempts,
-        method.name,
-        tostring(detail)
-    ))
+    for _, method in ipairs(methods) do
+        local ok, detail = method.fn(restart)
+        print(string.format(
+            "[XOMA V39] Injector Auto Retry attempt %d | %s | %s",
+            control.attempts,
+            method.name,
+            tostring(detail)
+        ))
 
-    if not ok then
-        control.nextAttempt = os.clock() + NO_METHOD_DELAY
-        return false
+        if ok then
+            local deadline = os.clock() + CONFIRM_WINDOW
+            repeat
+                local done, why = accepted(endFrame, restart, control.beforeText)
+                if done then
+                    control.accepted = true
+                    control.acceptedAt = os.clock()
+                    print("[XOMA V39] Injector Auto Retry confirmed | " .. tostring(why))
+                    return true
+                end
+                task.wait(0.04)
+            until os.clock() >= deadline
+        end
     end
 
-    control.sent = true
-    control.nextAttempt = os.clock() + METHOD_CONFIRM_WAIT
-
-    local deadline = os.clock() + METHOD_CONFIRM_WAIT
-    repeat
-        local done, why = accepted(endFrame, restart, beforeText)
-        if done then
-            control.accepted = true
-            control.acceptedAt = os.clock()
-            print("[XOMA V39] Auto Retry confirmed | " .. tostring(why))
-            return true
-        end
-        task.wait(0.04)
-    until os.clock() >= deadline
-
+    control.nextAttempt = os.clock() + RETRY_DELAY
     return false
 end
 
 task.spawn(function()
-    while session.alive and session.endClickHotfixSerialV39 == watcherSerial do
+    while session.alive and session.endClickInjectorSerialV39 == watcherSerial do
         task.wait(POLL)
 
         if session.forceAutoRetry ~= true then
@@ -406,17 +301,8 @@ task.spawn(function()
             continue
         end
 
-        local endFrame, restart, center = getLiveRestart()
+        local endFrame, restart = getLiveRestart()
         if not endFrame then
-            if control.sent and not control.accepted then
-                local done, why = accepted(control.endFrame, control.restart, control.beforeText or "")
-                if done then
-                    control.accepted = true
-                    control.acceptedAt = os.clock()
-                    print("[XOMA V39] Auto Retry confirmed | " .. tostring(why))
-                end
-            end
-
             if control.accepted and os.clock() - (control.acceptedAt or 0) >= NEW_ROUND_RESET then
                 resetControl()
             elseif not control.accepted and control.endFrame ~= nil then
@@ -430,31 +316,26 @@ task.spawn(function()
             control.endFrame = endFrame
             control.restart = restart
             stopReplayOnce()
-            print("[XOMA V39] Real Restart ready | " .. buttonText(restart))
+            print("[XOMA V39] Injector Auto Retry armed | Restart=" .. buttonText(restart))
         end
 
         if control.accepted then continue end
 
-        if control.sent then
-            local done, why = accepted(endFrame, restart, control.beforeText or "")
-            if done then
-                control.accepted = true
-                control.acceptedAt = os.clock()
-                print("[XOMA V39] Auto Retry confirmed | " .. tostring(why))
-                continue
-            end
+        local done, why = accepted(endFrame, restart, control.beforeText or "")
+        if done and control.attempts > 0 then
+            control.accepted = true
+            control.acceptedAt = os.clock()
+            print("[XOMA V39] Injector Auto Retry confirmed | " .. tostring(why))
+            continue
         end
 
-        if os.clock() < (control.nextAttempt or 0) then continue end
-
-        local stillOnScreen, currentCenter = geometry(restart)
-        if stillOnScreen and restart.Active == true then
-            tryNextMethod(endFrame, restart, currentCenter or center)
+        if os.clock() >= (control.nextAttempt or 0) then
+            injectorClick(endFrame, restart)
         end
     end
 end)
 
-session.endClickBuild = "PASS35-AUTORETRY-DIRECT-SIGNAL-V39"
-print("[XOMA V39] Auto Retry direct-signal hotfix installed")
+session.endClickBuild = "PASS36-AUTORETRY-INJECTOR-API-V39"
+print("[XOMA V39] Auto Retry injector-API-only watcher installed")
 
 return session.XOMA

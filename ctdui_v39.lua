@@ -1,5 +1,5 @@
 -- XOMA / CTDIG cache-busted bootstrap
--- Build: PASS34-AUTORETRY-REAL-RESTART-V39
+-- Build: PASS35-AUTORETRY-DIRECT-SIGNAL-V39
 -- V33 replay base is frozen to one source snapshot, then V39 applies only the
 -- existing input/reliability/webhook layers plus the authoritative end watcher.
 
@@ -28,8 +28,6 @@ local function runPinnedBase()
         "https://raw.githubusercontent.com/evilxoma/xomahub/" .. BASE_REF .. "/ctdui.lua"
     )
 
-    -- The pinned ctdui.lua historically fetched src/patches from main. Freeze
-    -- those URLs too so V39 cannot silently change when another branch updates.
     source = source:gsub(
         "https://raw%.githubusercontent%.com/evilxoma/xomahub/refs/heads/main/src/",
         "https://raw.githubusercontent.com/evilxoma/xomahub/" .. CORE_REF .. "/src/"
@@ -39,16 +37,11 @@ local function runPinnedBase()
         "https://raw.githubusercontent.com/evilxoma/xomahub/" .. CORE_REF .. "/patches/"
     )
 
-    -- Recorder strategies created while V39 is loaded must point straight back
-    -- to V39; do not depend on the later reliability monitor to rewrite V33.
     source = source:gsub(
         "https://raw%.githubusercontent%.com/evilxoma/xomahub/refs/heads/main/ctdui_v33%.lua",
         "https://raw.githubusercontent.com/evilxoma/xomahub/refs/heads/main/ctdui_v39.lua"
     )
 
-    -- Add one V39-only escape hatch for the end watcher. It changes no replay
-    -- action implementation; it only flips the same local stop flags used by
-    -- the existing Stop Replay/end-action paths once a REAL end screen exists.
     local replayStopPatch = [=[
 local replayStopHookCount
 coreSource, replayStopHookCount = coreSource:gsub(
@@ -110,16 +103,16 @@ XOMA = runSource(
 ) or XOMA
 
 XOMA = runSource(
-    "https://raw.githubusercontent.com/evilxoma/xomahub/68a157804273463b5ccd67c04708676730a16490/patches/endclick_v39_hotfix.lua",
-    "XOMA V39 real Restart hotfix"
+    "https://raw.githubusercontent.com/evilxoma/xomahub/e0118cd9608dd9bc27065b3d81b054fdac81eacc/patches/endclick_v39_hotfix.lua",
+    "XOMA V39 direct-signal Restart hotfix"
 ) or XOMA
 
 local environment = typeof(getgenv) == "function" and getgenv() or _G
 local session = environment.CTDIG_SESSION
 if type(session) == "table" then
-    session.bootstrapBuild = "PASS34-AUTORETRY-REAL-RESTART-V39"
+    session.bootstrapBuild = "PASS35-AUTORETRY-DIRECT-SIGNAL-V39"
     session.bootstrapCoreRef = CORE_REF
 end
 
-print("[XOMA V39] cache-busted bootstrap loaded | real Restart Auto Retry")
+print("[XOMA V39] cache-busted bootstrap loaded | direct-signal Restart Auto Retry")
 return XOMA

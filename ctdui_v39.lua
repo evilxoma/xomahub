@@ -1,7 +1,7 @@
 -- XOMA / CTDIG cache-busted bootstrap
--- Build: PASS40-W0-EARLY-REPLAY-V39
+-- Build: PASS41-W0-NO-REQUIRE-V39
 -- V33 replay base is frozen to one source snapshot, then V39 applies only the
--- existing input/reliability/webhook layers plus the W0 start fix and end watcher.
+-- existing input/reliability/webhook layers plus the safe W0 gate and end watcher.
 
 local CORE_REF = "faa93d642b8f577bd50e819f5bbd34c442c291e6"
 local BASE_REF = "be5bdb4c68e59796ecba8bad836cbea945b77c02"
@@ -97,12 +97,12 @@ XOMA = runSource(
     "XOMA V40 webhook session accounting fix"
 ) or XOMA
 
--- W0 only: bypass the late recorder-source readiness gate and start replay when
--- the first recorded W0 Place is actually valid: Wave==0, surface replicated,
--- enough cash, CTDModule.checkcanplace==true, PlaceUnit ready.
+-- W0 only: no independent CTDModule require here. The core owns/caches the
+-- placement module. This gate only waits for W0 + real recorded surface +
+-- Map/Towers/PlaceUnit, then lets the normal performPlace path do validation.
 XOMA = runSource(
-    "https://raw.githubusercontent.com/evilxoma/xomahub/93336b33552f0cd7c07a20a99a1ffa252f8464f3/patches/w0_v32.lua",
-    "XOMA Wave 0 real-placement start fix"
+    "https://raw.githubusercontent.com/evilxoma/xomahub/32aa43f3a459f2523b31194dbd6012cb6ac1e8df/patches/w0_v33.lua",
+    "XOMA Wave 0 safe Potassium start fix"
 ) or XOMA
 
 XOMA = runSource(
@@ -120,9 +120,9 @@ XOMA = runSource(
 local environment = typeof(getgenv) == "function" and getgenv() or _G
 local session = environment.CTDIG_SESSION
 if type(session) == "table" then
-    session.bootstrapBuild = "PASS40-W0-EARLY-REPLAY-V39"
+    session.bootstrapBuild = "PASS41-W0-NO-REQUIRE-V39"
     session.bootstrapCoreRef = CORE_REF
 end
 
-print("[XOMA V39] bootstrap loaded | W0 early replay fixed | webhook fixed | PASS36 Auto Retry unchanged")
+print("[XOMA V39] bootstrap loaded | W0 Potassium gate fixed | webhook fixed | PASS36 Auto Retry unchanged")
 return XOMA

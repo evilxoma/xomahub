@@ -1,5 +1,5 @@
 -- XOMA / CTDIG cache-busted bootstrap
--- Build: PASS41-W0-NO-REQUIRE-V39
+-- Build: PASS42-POTASSIUM-PLACE-FALLBACK-V39
 -- V33 replay base is frozen to one source snapshot, then V39 applies only the
 -- existing input/reliability/webhook layers plus the safe W0 gate and end watcher.
 
@@ -64,6 +64,52 @@ if replayStopHookCount ~= 1 then
     error("XOMA V39 replay-stop hook injection failed")
 end
 
+-- Potassium can successfully require CTDModule itself, but CTDModule.checkcanplace
+-- may perform nested requires that are rejected in executor/RobloxScript context:
+--   Cannot require a non-RobloxScript module from a RobloxScript
+-- That is an executor limitation, not a negative placement result. In exactly
+-- that case, treat client validation as unavailable and let the real PlaceUnit
+-- RemoteFunction remain authoritative. Every other checkcanplace error/false
+-- result keeps the existing behavior.
+local validationOld = [[        if not checked then
+            return nil, "placement validation failed: " .. tostring(valid) .. " | surface=" .. tostring(surface and surface:GetFullName()) .. " | pos=" .. tostring(position)
+        end
+        placeable = valid == true]]
+
+local validationOldPlain = [[        if not checked then
+            return nil, "placement validation failed: " .. tostring(valid)
+        end
+        placeable = valid == true]]
+
+local validationNew = [[        if not checked then
+            local validationError = tostring(valid)
+            if validationError:find("Cannot require a non-RobloxScript module from a RobloxScript", 1, true) then
+                placeable = true
+                if not session.potassiumPlacementValidationWarned then
+                    session.potassiumPlacementValidationWarned = true
+                    warn("[XOMA PLACE] Potassium cannot execute nested checkcanplace require; deferring this validation to PlaceUnit server")
+                end
+            else
+                return nil, "placement validation failed: " .. validationError .. " | surface=" .. tostring(surface and surface:GetFullName()) .. " | pos=" .. tostring(position)
+            end
+        else
+            placeable = valid == true
+        end]]
+
+local validationAt = coreSource:find(validationOld, 1, true)
+local validationNeedle = validationOld
+if not validationAt then
+    validationAt = coreSource:find(validationOldPlain, 1, true)
+    validationNeedle = validationOldPlain
+end
+if not validationAt then
+    error("XOMA V42 Potassium placement patch anchor missing")
+end
+coreSource = coreSource:sub(1, validationAt - 1)
+    .. validationNew
+    .. coreSource:sub(validationAt + #validationNeedle)
+print("[XOMA V42] Potassium placement fallback injected | recorder untouched")
+
 ]=]
 
     source = insertBeforePlain(
@@ -120,9 +166,9 @@ XOMA = runSource(
 local environment = typeof(getgenv) == "function" and getgenv() or _G
 local session = environment.CTDIG_SESSION
 if type(session) == "table" then
-    session.bootstrapBuild = "PASS41-W0-NO-REQUIRE-V39"
+    session.bootstrapBuild = "PASS42-POTASSIUM-PLACE-FALLBACK-V39"
     session.bootstrapCoreRef = CORE_REF
 end
 
-print("[XOMA V39] bootstrap loaded | W0 Potassium gate fixed | webhook fixed | PASS36 Auto Retry unchanged")
+print("[XOMA V39] bootstrap loaded | Potassium placement fixed | W0 fixed | webhook fixed | PASS36 Auto Retry unchanged")
 return XOMA
